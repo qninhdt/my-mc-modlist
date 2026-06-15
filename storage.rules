@@ -1,0 +1,25 @@
+rules_version = '2';
+
+// Firebase Storage rules for Minecraft Modpack Manager.
+// - Owner/Editor-only write (upload/delete jars): supply chain security guard at community scale.
+// - Member-only read (download/fetch jars): gates files to authorized users.
+// - Interoperates with Firestore pack documents to authorize based on ownerUid, members, and memberUids.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /packs/{packId}/{allPaths=**} {
+      function getPack(packId) {
+        return firestore.get(/databases/(default)/documents/modpacks/$(packId)).data;
+      }
+      
+      allow read: if request.auth != null && (
+        getPack(packId).ownerUid == request.auth.uid ||
+        (getPack(packId).memberUids != null && request.auth.uid in getPack(packId).memberUids)
+      );
+      
+      allow write: if request.auth != null && (
+        getPack(packId).ownerUid == request.auth.uid ||
+        (getPack(packId).members != null && getPack(packId).members[request.auth.uid] == 'editor')
+      );
+    }
+  }
+}

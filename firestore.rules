@@ -1,0 +1,133 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions for modpack authorization
+    function getPack(packId) {
+      return get(/databases/$(database)/documents/modpacks/$(packId)).data;
+    }
+    
+    // Member: user is either the pack owner or listed in memberUids
+    function isPackMember(packId) {
+      return request.auth != null && (
+        getPack(packId).ownerUid == request.auth.uid ||
+        (getPack(packId).memberUids != null && request.auth.uid in getPack(packId).memberUids)
+      );
+    }
+    
+    // Editor: user is either the pack owner or has 'editor' role in members map
+    function isPackEditor(packId) {
+      return request.auth != null && (
+        getPack(packId).ownerUid == request.auth.uid ||
+        (getPack(packId).members != null && getPack(packId).members[request.auth.uid] == 'editor')
+      );
+    }
+
+    // Users: anyone authenticated can read profile summaries (needed for share panel details).
+    // Write is strictly owned.
+    match /users/{uid} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == uid
+                   && request.resource.data.uid == uid;
+    }
+
+    // Modpacks Collection
+    match /modpacks/{packId} {
+      // Read: allow if authenticated and member or owner of the pack (handles legacy/missing memberUids field)
+      allow read: if request.auth != null && (
+        resource.data.ownerUid == request.auth.uid ||
+        (resource.data.memberUids != null && request.auth.uid in resource.data.memberUids)
+      );
+      
+      // Create: ownerUid must be the creator, and memberUids initialized with only the creator
+      allow create: if request.auth != null
+                    && request.resource.data.ownerUid == request.auth.uid
+                    && request.resource.data.memberUids == [request.auth.uid];
+      
+      // Update:
+      // 1. Owner can change anything
+      // 2. Editor can change meta but cannot change ACL fields (members, memberUids, memberEmails, ownerUid)
+      // 3. Any member can remove themselves (leave the pack)
+      allow update: if request.auth != null && (
+        resource.data.ownerUid == request.auth.uid ||
+        (resource.data.members != null && resource.data.members[request.auth.uid] == 'editor' &&
+         request.resource.data.members == resource.data.members &&
+         request.resource.data.memberUids == resource.data.memberUids &&
+         request.resource.data.memberEmails == resource.data.memberEmails &&
+         request.resource.data.ownerUid == resource.data.ownerUid) ||
+        (resource.data.memberUids != null && request.auth.uid in resource.data.memberUids &&
+         !(request.auth.uid in request.resource.data.memberUids) &&
+         request.resource.data.ownerUid == resource.data.ownerUid)
+      );
+      
+      // Delete: owner-only
+      allow delete: if request.auth != null && resource.data.ownerUid == request.auth.uid;
+
+      // Subcollections: mods, snapshots
+      match /mods/{modId} {
+        allow read: if isPackMember(packId);
+        allow write: if isPackEditor(packId);
+      }
+
+      match /snapshots/{snapId} {
+        allow read: if isPackMember(packId);
+        allow write: if isPackEditor(packId);
+        
+        // Snapshots nested mods subcollection
+        match /mods/{modId} {
+          allow read: if isPackMember(packId);
+          allow write: if isPackEditor(packId);
+        }
+      }
+
+      // Activity Feed & Comments subcollection
+      match /activity/{entryId} {
+        // Read: allowed for any member of the modpack
+        allow read: if isPackMember(packId);
+
+        // Create: allowed for members, validating actor uid and text length cap
+        allow create: if isPackMember(packId)
+                      && request.resource.data.actor.uid == request.auth.uid
+                      && (request.resource.data.type != 'comment' || (
+                           request.resource.data.payload.text is string &&
+                           request.resource.data.payload.text.size() <= 2000
+                         ));
+
+        // Update: disabled completely (no comment edits, immutable history)
+        allow update: if false;
+
+        // Delete: allowed only for comments by their author or the pack owner (moderation)
+        allow delete: if request.auth != null
+                      && resource.data.type == 'comment'
+                      && (
+                           resource.data.actor.uid == request.auth.uid ||
+                           getPack(packId).ownerUid == request.auth.uid
+                         );
+      }
+    }
+
+    // Invites Collection
+    match /invites/{inviteId} {
+      // Read: allowed for inviter (owner) or invitee (matching verified email)
+      allow read: if request.auth != null && (
+        request.auth.uid == resource.data.invitedBy ||
+        (request.auth.token.email != null && request.auth.token.email.lower() == resource.data.email)
+      );
+      
+      // Create: only the owner of the target pack can create invites
+      allow create: if request.auth != null 
+                    && request.resource.data.invitedBy == request.auth.uid
+                    && getPack(request.resource.data.packId).ownerUid == request.auth.uid;
+                    
+      // Delete/Revoke/Decline: allowed for the inviter or the invitee
+      allow delete: if request.auth != null && (
+        request.auth.uid == resource.data.invitedBy ||
+        (request.auth.token.email != null && request.auth.token.email.lower() == resource.data.email)
+      );
+      
+      // Updates (accepting invites) happen through the trusted Next.js admin API route
+      allow update: if false;
+    }
+  }
+}
