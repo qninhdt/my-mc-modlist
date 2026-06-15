@@ -1,5 +1,4 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { verifyRequest } from "@/lib/auth/verify-request";
 import { getProjectVersions } from "@/lib/api/modrinth";
 import { getMod } from "@/lib/api/modpackindex";
 

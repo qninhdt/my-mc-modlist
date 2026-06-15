@@ -1,5 +1,4 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { verifyRequest } from "@/lib/auth/verify-request";
 import { getProject, getProjectMembers } from "@/lib/api/modrinth";
 import { searchMods, getMod } from "@/lib/api/modpackindex";
 import { normalizeProject, normalizeCurseforgeOnly, mapCurseforgeCategory } from "@/lib/api/normalize";
