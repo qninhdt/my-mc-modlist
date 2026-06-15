@@ -1,11 +1,10 @@
 import { adminDb } from "@/lib/firebase/admin";
-import { Timestamp } from "firebase-admin/firestore";
 
 // Server-side Firestore cache mirror. Every upstream API read flows through this
 // so 1000 users share one cached copy instead of each hitting ModpackIndex
 // (3,600 req/hr total cap) or Modrinth (300 req/min per IP — all users egress the
 // one Vercel IP). Tiered TTL: ID/detail lookups cache long (bounded key space),
-// search queries cache short and the collection is capped (unbounded query strings).
+// search queries cache short and the collection is capped (unbounded query strings).\
 
 export type CacheTier = "detail" | "search";
 
@@ -30,32 +29,37 @@ function safeDocId(key: string): string {
 
 type CacheDoc = {
   payload: unknown;
-  fetchedAt: Timestamp;
+  fetchedAt: unknown; // Firestore Timestamp — typed loosely to avoid static import
   ttlSeconds: number;
 };
 
-function cacheRef(tier: CacheTier, key: string) {
-  return adminDb().collection("cache").doc(`${tier}_${safeDocId(key)}`);
+async function cacheRef(tier: CacheTier, key: string) {
+  const db = await adminDb();
+  return db.collection("cache").doc(`${tier}_${safeDocId(key)}`);
 }
 
 // Returns the cached payload if present and still fresh, else null.
 export async function cacheGet<T>(tier: CacheTier, key: string): Promise<T | null> {
-  const snap = await cacheRef(tier, key).get();
+  const ref = await cacheRef(tier, key);
+  const snap = await ref.get();
   if (!snap.exists) return null;
   const data = snap.data() as CacheDoc | undefined;
   if (!data) return null;
-  const ageMs = Date.now() - data.fetchedAt.toMillis();
+  const fetchedAt = data.fetchedAt as { toMillis(): number };
+  const ageMs = Date.now() - fetchedAt.toMillis();
   if (ageMs > data.ttlSeconds * 1000) return null;
   return data.payload as T;
 }
 
 export async function cacheSet(tier: CacheTier, key: string, payload: unknown): Promise<void> {
+  const { Timestamp } = await import("firebase-admin/firestore");
+  const ref = await cacheRef(tier, key);
   const doc: CacheDoc = {
     payload,
     fetchedAt: Timestamp.now(),
     ttlSeconds: TTL_SECONDS[tier],
   };
-  await cacheRef(tier, key).set(doc);
+  await ref.set(doc);
 }
 
 // Wraps a fetcher with cache-aside semantics: serve fresh cache, else fetch +

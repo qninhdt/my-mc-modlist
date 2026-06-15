@@ -1,7 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { verifyRequest } from "@/lib/auth/verify-request";
 import { adminDb } from "@/lib/firebase/admin";
-import { FieldValue } from "firebase-admin/firestore";
 
 export const runtime = "nodejs";
 
@@ -45,7 +44,9 @@ export async function POST(request: NextRequest) {
     }
 
     // 2. Query pending invite(s) for this email
-    const invitesRef = adminDb().collection("invites");
+    const { FieldValue } = await import("firebase-admin/firestore");
+    const db = await adminDb();
+    const invitesRef = db.collection("invites");
     let pendingDocs: FirebaseFirestore.DocumentSnapshot[] = [];
 
     if (inviteId) {
@@ -76,7 +77,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ acceptedCount: 0 });
     }
 
-    const db = adminDb();
     const batch = db.batch();
 
     // 3. Process each invite and update the pack document

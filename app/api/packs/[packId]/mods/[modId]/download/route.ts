@@ -20,7 +20,8 @@ export async function GET(
 
   try {
     // 2. Verify pack membership
-    const packRef = adminDb().collection("modpacks").doc(packId);
+    const db = await adminDb();
+    const packRef = db.collection("modpacks").doc(packId);
     const packSnap = await packRef.get();
     
     if (!packSnap.exists) {
@@ -60,7 +61,8 @@ export async function GET(
     }
 
     // 4. Check if file exists in Storage and mint a signed URL
-    const bucket = adminStorage().bucket();
+    const storage = await adminStorage();
+    const bucket = storage.bucket();
     const file = bucket.file(storagePath);
 
     const [exists] = await file.exists();

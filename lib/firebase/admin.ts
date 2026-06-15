@@ -1,9 +1,15 @@
-import { cert, getApp, getApps, initializeApp, type App } from "firebase-admin/app";
-import { getAuth, type Auth } from "firebase-admin/auth";
-import { getFirestore, type Firestore } from "firebase-admin/firestore";
-import { getStorage, type Storage } from "firebase-admin/storage";
+import type { App } from "firebase-admin/app";
+import type { Auth } from "firebase-admin/auth";
+import type { Firestore } from "firebase-admin/firestore";
+import type { Storage } from "firebase-admin/storage";
 
-function buildAdminApp(): App {
+// Dynamic imports are used for ALL firebase-admin sub-packages to prevent
+// Turbopack/Webpack from bundling them at build time. Static top-level imports
+// cause ERR_REQUIRE_ESM because firebase-admin uses jose v5 (ESM-only) via
+// jwks-rsa. Dynamic import() runs at Node.js request time, not build time.
+
+async function buildAdminApp(): Promise<App> {
+  const { getApps, getApp, initializeApp, cert } = await import("firebase-admin/app");
   if (getApps().length) return getApp();
 
   const projectId = process.env.FIREBASE_ADMIN_PROJECT_ID;
@@ -23,21 +29,23 @@ function buildAdminApp(): App {
   });
 }
 
-// Lazy singletons: the admin app is built on first use at request time, never at
-// module load. This keeps `next build` page-data collection from requiring creds.
-let appInstance: App | null = null;
-function app(): App {
-  return (appInstance ??= buildAdminApp());
+// Lazy singleton promise — initialized once on first use.
+let appPromise: Promise<App> | null = null;
+function app(): Promise<App> {
+  return (appPromise ??= buildAdminApp());
 }
 
-export function adminAuth(): Auth {
-  return getAuth(app());
+export async function adminAuth(): Promise<Auth> {
+  const { getAuth } = await import("firebase-admin/auth");
+  return getAuth(await app());
 }
 
-export function adminDb(): Firestore {
-  return getFirestore(app());
+export async function adminDb(): Promise<Firestore> {
+  const { getFirestore } = await import("firebase-admin/firestore");
+  return getFirestore(await app());
 }
 
-export function adminStorage(): Storage {
-  return getStorage(app());
+export async function adminStorage(): Promise<Storage> {
+  const { getStorage } = await import("firebase-admin/storage");
+  return getStorage(await app());
 }

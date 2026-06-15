@@ -20,7 +20,7 @@ export async function verifyRequest(request: NextRequest): Promise<AuthResult> {
   }
 
   try {
-    const token = await adminAuth().verifyIdToken(idToken);
+    const token = await (await adminAuth()).verifyIdToken(idToken);
     return { ok: true, uid: token.uid, token };
   } catch {
     return { ok: false, status: 401, error: "Invalid or expired token" };
