@@ -19,7 +19,7 @@ async function buildAdminApp(): Promise<App> {
 
   if (!projectId || !clientEmail || !privateKey) {
     throw new Error(
-      "Missing firebase-admin credentials (FIREBASE_ADMIN_PROJECT_ID / CLIENT_EMAIL / PRIVATE_KEY)."
+      "Missing firebase-admin credentials: check FIREBASE_ADMIN_PROJECT_ID, FIREBASE_ADMIN_CLIENT_EMAIL, FIREBASE_ADMIN_PRIVATE_KEY in Vercel env vars."
     );
   }
 
@@ -29,10 +29,16 @@ async function buildAdminApp(): Promise<App> {
   });
 }
 
-// Lazy singleton promise — initialized once on first use.
+// Lazy singleton promise — reset on failure so the next request retries.
 let appPromise: Promise<App> | null = null;
 function app(): Promise<App> {
-  return (appPromise ??= buildAdminApp());
+  if (!appPromise) {
+    appPromise = buildAdminApp().catch((err) => {
+      appPromise = null; // reset so next request retries
+      throw err;
+    });
+  }
+  return appPromise;
 }
 
 export async function adminAuth(): Promise<Auth> {
