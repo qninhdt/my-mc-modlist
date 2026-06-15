@@ -6,7 +6,7 @@ import { adminDb } from "../lib/firebase/admin";
 
 async function main() {
   console.log("Connecting to Firestore to clear cache...");
-  const db = adminDb();
+  const db = await adminDb();
   const snapshot = await db.collection("cache").get();
   console.log(`Found ${snapshot.size} documents in cache collection.`);
   if (snapshot.size === 0) {
