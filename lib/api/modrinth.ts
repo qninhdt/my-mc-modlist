@@ -86,30 +86,31 @@ function searchKey(params: SearchParams): string {
 export async function searchProjects(
   params: SearchParams
 ): Promise<ModrinthSearchResponse> {
-  if (isSqliteDbAvailable()) {
-    const queryVal = params.query || "";
-    const offset = params.offset ?? 0;
-    const limit = params.limit ?? 30;
+  const cacheKey = `modrinth:search:${searchKey(params)}`;
+  return cached("search", cacheKey, async () => {
+    if (isSqliteDbAvailable()) {
+      const queryVal = params.query || "";
+      const offset = params.offset ?? 0;
+      const limit = params.limit ?? 30;
 
-    const { hits, total } = await localSearchModrinthProjects(queryVal, {
-      loaders: params.loaders,
-      versions: params.versions,
-      categories: params.categories,
-      environments: params.environments,
-      sort: params.index,
-      offset,
-      limit,
-    });
+      const { hits, total } = await localSearchModrinthProjects(queryVal, {
+        loaders: params.loaders,
+        versions: params.versions,
+        categories: params.categories,
+        environments: params.environments,
+        sort: params.index,
+        offset,
+        limit,
+      });
 
-    return {
-      hits,
-      offset,
-      limit,
-      total_hits: total,
-    };
-  }
+      return {
+        hits,
+        offset,
+        limit,
+        total_hits: total,
+      };
+    }
 
-  return cached("search", `modrinth:search:${searchKey(params)}`, async () => {
     const qs = new URLSearchParams();
     if (params.query) qs.set("query", params.query);
     const facets = buildFacets(params);
@@ -122,14 +123,14 @@ export async function searchProjects(
 }
 
 export async function getProject(idOrSlug: string): Promise<ModrinthProject> {
-  if (isSqliteDbAvailable()) {
-    const local = await localGetModrinthProject(idOrSlug);
-    if (local) return local;
-  }
+  return cached("detail", `modrinth:project:${idOrSlug}`, async () => {
+    if (isSqliteDbAvailable()) {
+      const local = await localGetModrinthProject(idOrSlug);
+      if (local) return local;
+    }
 
-  return cached("detail", `modrinth:project:${idOrSlug}`, () =>
-    modrinthFetch<ModrinthProject>(`/project/${encodeURIComponent(idOrSlug)}`)
-  );
+    return modrinthFetch<ModrinthProject>(`/project/${encodeURIComponent(idOrSlug)}`);
+  });
 }
 
 // Fetches all versions of a project, optionally filtered by loader + MC version.
@@ -140,13 +141,6 @@ export async function getProjectVersions(
   projectId: string,
   opts?: { loaders?: string[]; gameVersions?: string[] }
 ): Promise<ModrinthVersion[]> {
-  if (isSqliteDbAvailable()) {
-    const local = await localGetProjectVersions(projectId, opts);
-    if (local && local.length > 0) {
-      return local;
-    }
-  }
-
   const qs = new URLSearchParams();
   if (opts?.loaders?.length) qs.set("loaders", JSON.stringify(opts.loaders));
   if (opts?.gameVersions?.length)
@@ -154,37 +148,44 @@ export async function getProjectVersions(
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
   const cacheKey = `modrinth:versions:${projectId}:${suffix}`;
 
-  return cached("detail", cacheKey, () =>
-    modrinthFetch<ModrinthVersion[]>(
+  return cached("detail", cacheKey, async () => {
+    if (isSqliteDbAvailable()) {
+      const local = await localGetProjectVersions(projectId, opts);
+      if (local && local.length > 0) {
+        return local;
+      }
+    }
+
+    return modrinthFetch<ModrinthVersion[]>(
       `/project/${encodeURIComponent(projectId)}/version${suffix}`
-    )
-  );
+    );
+  });
 }
 
 // Fetches the team members of a project from Modrinth, cached under the detail tier.
 export async function getProjectMembers(
   projectId: string
 ): Promise<ModrinthTeamMember[]> {
-  if (isSqliteDbAvailable()) {
-    return localGetProjectMembers(projectId);
-  }
+  return cached("detail", `modrinth:members:${projectId}`, async () => {
+    if (isSqliteDbAvailable()) {
+      return localGetProjectMembers(projectId);
+    }
 
-  return cached("detail", `modrinth:members:${projectId}`, () =>
-    modrinthFetch<ModrinthTeamMember[]>(
+    return modrinthFetch<ModrinthTeamMember[]>(
       `/project/${encodeURIComponent(projectId)}/members`
-    )
-  );
+    );
+  });
 }
 
 export async function getVersion(versionId: string): Promise<ModrinthVersion> {
-  if (isSqliteDbAvailable()) {
-    const local = await localGetVersion(versionId);
-    if (local) return local;
-  }
+  return cached("detail", `modrinth:version:${versionId}`, async () => {
+    if (isSqliteDbAvailable()) {
+      const local = await localGetVersion(versionId);
+      if (local) return local;
+    }
 
-  return cached("detail", `modrinth:version:${versionId}`, () =>
-    modrinthFetch<ModrinthVersion>(`/version/${encodeURIComponent(versionId)}`)
-  );
+    return modrinthFetch<ModrinthVersion>(`/version/${encodeURIComponent(versionId)}`);
+  });
 }
 
 

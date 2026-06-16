@@ -36,15 +36,15 @@ export async function searchMods(
   page: number = 1,
   limit: number = 20
 ): Promise<{ data: ModpackIndexMod[]; total: number } | null> {
-  if (isSqliteDbAvailable()) {
-    const offset = (page - 1) * limit;
-    const { hits, total } = await localSearchMpiModsPaged(name || "", { offset, limit });
-    return { data: hits, total };
-  }
-
   const queryTerm = name?.toLowerCase().trim() ?? "";
   const key = `mpi:search:${queryTerm}:${page}:${limit}`;
   return cached("search", key, async () => {
+    if (isSqliteDbAvailable()) {
+      const offset = (page - 1) * limit;
+      const { hits, total } = await localSearchMpiModsPaged(name || "", { offset, limit });
+      return { data: hits, total };
+    }
+
     const qs = new URLSearchParams({
       page: String(page),
       limit: String(limit),
@@ -62,12 +62,12 @@ export async function searchMods(
 }
 
 export async function getMod(modId: number): Promise<ModpackIndexMod | null> {
-  if (isSqliteDbAvailable()) {
-    const local = await localGetMpiMod(modId);
-    if (local) return local;
-  }
-
   return cached("detail", `mpi:mod:${modId}`, async () => {
+    if (isSqliteDbAvailable()) {
+      const local = await localGetMpiMod(modId);
+      if (local) return local;
+    }
+
     const body = await mpiFetch<{ data: ModpackIndexMod }>(`/mod/${modId}`);
     return body?.data ?? null;
   });
@@ -177,69 +177,72 @@ export async function getMpiModsSearch(
   versions: string[],
   categories: string[]
 ): Promise<{ data: ModpackIndexMod[]; total: number }> {
-  if (isSqliteDbAvailable()) {
-    const offset = (page - 1) * limit;
-    const { hits, total } = await localSearchMpiModsPaged(query, {
-      loaders,
-      versions,
-      categories,
-      offset,
-      limit
-    });
-    return { data: hits, total };
-  }
-
-  const queryTerm = query.trim();
-
-  if (queryTerm) {
-    // Search with query: name-search is capped at 250 matches upstream by ModpackIndex.
-    // Fetch all matching results, filter them locally, and return the correct page slice.
-    const allFiltered = await searchAndFilterMpiMods(queryTerm, loaders, versions, categories);
-    const offset = (page - 1) * limit;
-    const sliced = allFiltered.slice(offset, offset + limit);
-    return { data: sliced, total: allFiltered.length };
-  } else {
-    // Browse (empty query): cannot fetch all 144,000+ mods locally.
-    // Use API pagination. If a version filter is present, query the version's mods endpoint.
-    let res: { data: ModpackIndexMod[]; total: number } | null = null;
-    if (versions.length > 0) {
-      const versionId = await getMinecraftVersionId(versions[0]);
-      if (versionId) {
-        res = await searchModsByVersion(versionId, page, limit);
-      }
-    }
-    if (!res) {
-      res = await searchMods("", page, limit);
+  const cacheKey = `mpi:search-paged:${query.trim().toLowerCase()}:${page}:${limit}:${[...loaders].sort().join(",")}:${[...versions].sort().join(",")}:${[...categories].sort().join(",")}`;
+  return cached("search", cacheKey, async () => {
+    if (isSqliteDbAvailable()) {
+      const offset = (page - 1) * limit;
+      const { hits, total } = await localSearchMpiModsPaged(query, {
+        loaders,
+        versions,
+        categories,
+        offset,
+        limit
+      });
+      return { data: hits, total };
     }
 
-    const data = res?.data ?? [];
-    const total = res?.total ?? 0;
+    const queryTerm = query.trim();
 
-    // Apply local post-filtering for categories/loaders on the page slice
-    let filtered = data;
-
-    // 1. Loader filter (for Modrinth-linked mods only, CF-only are allowed through)
-    if (loaders.length > 0) {
-      filtered = filtered.filter((mpiMod) => {
-        const mpiModrinthInfos = mpiMod.modrinth_info ?? [];
-        if (mpiModrinthInfos.length > 0) {
-          return mpiModrinthInfos.some((info) =>
-            info.loaders?.some((l) => loaders.includes(l))
-          );
+    if (queryTerm) {
+      // Search with query: name-search is capped at 250 matches upstream by ModpackIndex.
+      // Fetch all matching results, filter them locally, and return the correct page slice.
+      const allFiltered = await searchAndFilterMpiMods(queryTerm, loaders, versions, categories);
+      const offset = (page - 1) * limit;
+      const sliced = allFiltered.slice(offset, offset + limit);
+      return { data: sliced, total: allFiltered.length };
+    } else {
+      // Browse (empty query): cannot fetch all 144,000+ mods locally.
+      // Use API pagination. If a version filter is present, query the version's mods endpoint.
+      let res: { data: ModpackIndexMod[]; total: number } | null = null;
+      if (versions.length > 0) {
+        const versionId = await getMinecraftVersionId(versions[0]);
+        if (versionId) {
+          res = await searchModsByVersion(versionId, page, limit);
         }
-        return true;
-      });
-    }
+      }
+      if (!res) {
+        res = await searchMods("", page, limit);
+      }
 
-    // 2. Category filter (ignoring client/server environment strings)
-    const realCategories = categories.filter((c) => c !== "client" && c !== "server");
-    if (realCategories.length > 0) {
-      filtered = filtered.filter((mpiMod) => {
-        const tags = mpiMod.categories?.map((c) => mapCurseforgeCategory(c.name)) ?? [];
-        return tags.some((t) => realCategories.includes(t.toLowerCase()));
-      });
-    }
+      const data = res?.data ?? [];
+      const total = res?.total ?? 0;
 
-    return { data: filtered, total };
-  }
+      // Apply local post-filtering for categories/loaders on the page slice
+      let filtered = data;
+
+      // 1. Loader filter (for Modrinth-linked mods only, CF-only are allowed through)
+      if (loaders.length > 0) {
+        filtered = filtered.filter((mpiMod) => {
+          const mpiModrinthInfos = mpiMod.modrinth_info ?? [];
+          if (mpiModrinthInfos.length > 0) {
+            return mpiModrinthInfos.some((info) =>
+              info.loaders?.some((l) => loaders.includes(l))
+            );
+          }
+          return true;
+        });
+      }
+
+      // 2. Category filter (ignoring client/server environment strings)
+      const realCategories = categories.filter((c) => c !== "client" && c !== "server");
+      if (realCategories.length > 0) {
+        filtered = filtered.filter((mpiMod) => {
+          const tags = mpiMod.categories?.map((c) => mapCurseforgeCategory(c.name)) ?? [];
+          return tags.some((t) => realCategories.includes(t.toLowerCase()));
+        });
+      }
+
+      return { data: filtered, total };
+    }
+  });
 }
