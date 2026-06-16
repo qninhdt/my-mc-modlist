@@ -46,14 +46,6 @@ async function fetchWithRetry(url: string, retries = 3): Promise<any> {
   }
 }
 
-function isGameVersionAtLeast116(version: string): boolean {
-  const match = version.match(/^1\.(\d+)/);
-  if (match) {
-    return parseInt(match[1], 10) >= 16;
-  }
-  return false;
-}
-
 // 1. Modrinth category tags discovery
 async function getModrinthCategories(): Promise<{ name: string; slug: string }[]> {
   try {
@@ -208,9 +200,7 @@ export async function crawlModrinth(forceAll = false) {
         const needsVersions = forceAll || !storedUpdated || storedUpdated !== p.updated;
 
         if (needsVersions && Array.isArray(p.versions) && p.versions.length > 0) {
-          // Slice to newest 50 versions to keep crawl fast and avoid database ballooning
-          const versionsToFetch = p.versions.slice(0, 50);
-          allVersionIdsToFetch.push(...versionsToFetch);
+          allVersionIdsToFetch.push(...p.versions);
           projectsNeedingVersions.add(modId);
         }
       }
@@ -250,12 +240,7 @@ export async function crawlModrinth(forceAll = false) {
         const modId = p.id;
         const needsVersions = projectsNeedingVersions.has(modId);
 
-        let versions = versionsMap.get(modId) || [];
-        if (needsVersions) {
-          versions = versions.filter((v: any) =>
-            isGameVersionAtLeast116(v.game_versions || [])
-          );
-        }
+        const versions = versionsMap.get(modId) || [];
 
         // Prepare statements for this mod
         const statements: any[] = [];

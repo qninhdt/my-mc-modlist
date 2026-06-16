@@ -85,15 +85,6 @@ function getNextProxy(): string {
   return proxyUrl;
 }
 
-function isMinecraftVersionAtLeast116(v: string): boolean {
-  if (!/^1\.\d+(\.\d+)?$/.test(v)) return false;
-  const match = v.match(/^1\.(\d+)/);
-  if (match) {
-    return parseInt(match[1], 10) >= 16;
-  }
-  return false;
-}
-
 function parseGameVersionsAndLoaders(versions: string[]) {
   const gameVersions: string[] = [];
   const loaders: string[] = [];
@@ -353,11 +344,9 @@ export async function crawlCurseForge(forceAll = false) {
           }
         }
 
-        // Relate files/versions (keep only game versions >= 1.16)
+        // Relate files/versions
         if (Array.isArray(data.files)) {
-          const files = data.files.filter((f: any) =>
-            Array.isArray(f.versions) && f.versions.some(isMinecraftVersionAtLeast116)
-          );
+          const files = data.files;
 
           // Clear old versions
           const versionIds = files.map((f: any) => String(f.id));
