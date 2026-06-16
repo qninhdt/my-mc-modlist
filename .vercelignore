@@ -1,0 +1,9 @@
+*.db
+data/
+bin/
+.next/
+node_modules/
+.git/
+.env*
+.vercel
+/proxy/
