@@ -63,7 +63,7 @@ async function getModrinthCategories(): Promise<{ name: string; slug: string }[]
         .filter((item: any) => item.project_type === "mod")
         .map((item: any) => ({
           name: item.name,
-          slug: item.slug
+          slug: item.name // Category tag has name which acts as its slug/identifier
         }));
     }
   } catch (err: any) {
@@ -208,7 +208,9 @@ export async function crawlModrinth(forceAll = false) {
         const needsVersions = forceAll || !storedUpdated || storedUpdated !== p.updated;
 
         if (needsVersions && Array.isArray(p.versions) && p.versions.length > 0) {
-          allVersionIdsToFetch.push(...p.versions);
+          // Slice to newest 50 versions to keep crawl fast and avoid database ballooning
+          const versionsToFetch = p.versions.slice(0, 50);
+          allVersionIdsToFetch.push(...versionsToFetch);
           projectsNeedingVersions.add(modId);
         }
       }
