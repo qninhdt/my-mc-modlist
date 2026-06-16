@@ -334,6 +334,82 @@ async function crawlModpackIndex() {
   }
 }
 
+// Helper to process a single Modrinth batch.
+// Isolating the block in a separate function ensures that temporary buffers,
+// large JSON parsed projects, and database statements go out of scope immediately,
+// allowing the V8 garbage collector to free memory promptly.
+async function processModrinthBatch(
+  batch: string[],
+  headers: Record<string, string>
+): Promise<number> {
+  const idsParam = JSON.stringify(batch);
+  const url = `${MODRINTH_BASE_URL}/projects?ids=${encodeURIComponent(idsParam)}`;
+
+  let projects: any[] | null = null;
+  try {
+    projects = await fetchWithRetry(url, headers);
+  } catch (e: any) {
+    console.error(`[Error] Failed to fetch Modrinth batch: ${e.message}. Skipping batch.`);
+    await sleep(2000);
+    return 0;
+  }
+
+  if (projects && Array.isArray(projects)) {
+    const statements: any[] = [];
+    for (const p of projects) {
+      // Compress markdown description body to save space
+      const bodyCompressed = p.body
+        ? zlib.deflateSync(Buffer.from(p.body, "utf-8"))
+        : null;
+
+      const galleryJson = JSON.stringify(
+        (p.gallery || []).map((g: any) => ({
+          url: g.url,
+          featured: !!g.featured,
+          title: g.title || "",
+          description: g.description || "",
+          created: g.created || ""
+        }))
+      );
+
+      statements.push({
+        sql: `
+          INSERT OR REPLACE INTO modrinth_projects (
+            id, slug, title, description, categories, loaders, game_versions, 
+            downloads, followers, icon_url, client_side, server_side, 
+            discord_url, source_url, issues_url, wiki_url, body_compressed,
+            gallery_json, published, updated, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        args: [
+          p.id, p.slug, p.title, p.description || "",
+          JSON.stringify(p.categories || []), JSON.stringify(p.loaders || []),
+          JSON.stringify(p.game_versions || []), p.downloads || 0, p.followers || 0,
+          p.icon_url || "", p.client_side || "unknown", p.server_side || "unknown",
+          p.discord_url || "", p.source_url || "", p.issues_url || "", p.wiki_url || "",
+          bodyCompressed, galleryJson, p.published || "", p.updated || "",
+          new Date().toISOString()
+        ]
+      });
+    }
+
+    try {
+      await db.batch(statements, "write");
+      const count = projects.length;
+      
+      // Explicitly nullify large objects and clear arrays to free memory references
+      projects = null;
+      statements.length = 0;
+      
+      return count;
+    } catch (err: any) {
+      console.error(`[Error] Failed to execute Modrinth write batch:`, err.message);
+    }
+  }
+
+  return 0;
+}
+
 // 2. Modrinth Crawling
 async function crawlModrinth() {
   console.log("\n--- Starting Modrinth Detailed Project Crawl ---");
@@ -353,6 +429,7 @@ async function crawlModrinth() {
   }
   
   const allProjectIds = rows.map(r => r.project_id as string).filter(Boolean);
+  rows = null; // Free database rows memory immediately
   
   console.log(`Found ${allProjectIds.length} Modrinth project IDs to crawl (missing/uncrawled).`);
 
@@ -370,75 +447,24 @@ async function crawlModrinth() {
     "Accept": "application/json",
   };
 
+  let totalSaved = 0;
   for (let i = 0; i < totalBatches; i++) {
     const batch = allProjectIds.slice(i * batchSize, (i + 1) * batchSize);
     console.log(`[Modrinth] Querying batch ${i + 1}/${totalBatches} (${batch.length} projects)...`);
     
-    // Modrinth expects JSON array of IDs: ids=["id1","id2"]
-    const idsParam = JSON.stringify(batch);
-    const url = `${MODRINTH_BASE_URL}/projects?ids=${encodeURIComponent(idsParam)}`;
-    
-    let projects;
-    try {
-      projects = await fetchWithRetry(url, headers);
-    } catch (e: any) {
-      console.error(`[Error] Failed to fetch Modrinth batch ${i + 1}: ${e.message}. Skipping batch.`);
-      await sleep(2000);
-      continue;
+    const count = await processModrinthBatch(batch, headers);
+    totalSaved += count;
+
+    // Suggest a GC check if run with node --expose-gc
+    if (global && typeof (global as any).gc === "function" && i % 10 === 0) {
+      (global as any).gc();
     }
 
-    if (projects && Array.isArray(projects)) {
-      const statements: any[] = [];
-      for (const p of projects) {
-        // Compress markdown description body to save space
-        const bodyCompressed = p.body
-          ? zlib.deflateSync(Buffer.from(p.body, "utf-8"))
-          : null;
-
-        const galleryJson = JSON.stringify(
-          (p.gallery || []).map((g: any) => ({
-            url: g.url,
-            featured: !!g.featured,
-            title: g.title || "",
-            description: g.description || "",
-            created: g.created || ""
-          }))
-        );
-
-        statements.push({
-          sql: `
-            INSERT OR REPLACE INTO modrinth_projects (
-              id, slug, title, description, categories, loaders, game_versions, 
-              downloads, followers, icon_url, client_side, server_side, 
-              discord_url, source_url, issues_url, wiki_url, body_compressed,
-              gallery_json, published, updated, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `,
-          args: [
-            p.id, p.slug, p.title, p.description || "",
-            JSON.stringify(p.categories || []), JSON.stringify(p.loaders || []),
-            JSON.stringify(p.game_versions || []), p.downloads || 0, p.followers || 0,
-            p.icon_url || "", p.client_side || "unknown", p.server_side || "unknown",
-            p.discord_url || "", p.source_url || "", p.issues_url || "", p.wiki_url || "",
-            bodyCompressed, galleryJson, p.published || "", p.updated || "",
-            new Date().toISOString()
-          ]
-        });
-      }
-      
-      try {
-        await db.batch(statements, "write");
-        console.log(`[Modrinth] Saved ${projects.length} project details from batch.`);
-      } catch (err: any) {
-        console.error(`[Error] Failed to execute Modrinth batch:`, err.message);
-      }
-    }
-
-    // Rate-limiting pause: Modrinth limit is 300 req/min, so 300-500ms delay is extremely safe.
+    // Rate-limiting pause: Modrinth limit is 300 req/min, so 350ms delay is extremely safe.
     await sleep(350);
   }
   
-  console.log("Modrinth detailed crawl complete!");
+  console.log(`Modrinth detailed crawl complete! Saved ${totalSaved} project details.`);
 }
 
 async function main() {
