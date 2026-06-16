@@ -2,8 +2,10 @@ import {
   db,
   getOrCreateCategory,
   getOrCreateAuthor,
-  getOrCreateMinecraftVersion
+  getOrCreateMinecraftVersion,
 } from "./crawler-db";
+import { fetchWithProxy, getProxyCount, getActiveProxies, loadProxies } from "./crawler-proxy";
+import { crawlSingleCurseForge } from "./crawler-cf";
 
 const MPI_BASE_URL = "https://www.modpackindex.com/api/v1";
 
@@ -11,61 +13,64 @@ const USER_AGENT =
   process.env.UPSTREAM_USER_AGENT ??
   "qninhdt/my-mc-modlist/1.0 (contact: qndt123@gmail.com)";
 
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function fetchWithRetry(url: string, retries = 3): Promise<any> {
+async function fetchWithRetry(url: string, retries = 10): Promise<any> {
   const headers = {
     "User-Agent": USER_AGENT,
-    "Accept": "application/json"
+    Accept: "application/json",
   };
-
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      const res = await fetch(url, { headers });
-      if (res.status === 429) {
-        console.warn(`[MPI Rate Limited] Waiting 10 seconds...`);
-        await sleep(10000);
-        continue;
-      }
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-      }
-      return await res.json();
-    } catch (err: any) {
-      if (attempt === retries) {
-        throw err;
-      }
-      const backoff = attempt * 2000;
-      console.warn(`[MPI Fetch Error] Attempt ${attempt} failed: ${err.message}. Retrying in ${backoff}ms...`);
-      await sleep(backoff);
-    }
-  }
+  return fetchWithProxy(url, headers, retries);
 }
 
 async function getMetadataVal(key: string): Promise<string | undefined> {
   const res = await db.execute({
     sql: "SELECT value FROM metadata WHERE key = ?",
-    args: [key]
+    args: [key],
   });
   return res.rows[0]?.value as string | undefined;
 }
 
+let dbWritePromise: Promise<void> = Promise.resolve();
+
+async function runSerializedDb(fn: () => Promise<void>) {
+  const next = dbWritePromise.then(fn).catch(() => {});
+  dbWritePromise = next;
+  await next;
+}
+
 export async function crawlModpackIndex(startPageArg?: string) {
-  console.log("\n--- Starting ModpackIndex Relational Crawler ---");
   const metaVal = await getMetadataVal("last_fetched_page_mpi");
-  
+
   let startPage = 1;
   if (startPageArg) {
     startPage = parseInt(startPageArg, 10);
-    console.log(`Starting page overridden by flag to: ${startPage}`);
   } else if (metaVal) {
     startPage = Math.max(1, parseInt(metaVal, 10) - 1);
-    console.log(`Resuming ModpackIndex crawl from page: ${startPage}`);
   }
 
   const limit = 100;
-  let page = startPage;
-  let totalPages = page;
+
+  // 1. Fetch first page to determine totalPages
+  let firstRes;
+  try {
+    firstRes = await fetchWithRetry(
+      `${MPI_BASE_URL}/mods?page=${startPage}&limit=${limit}`,
+    );
+  } catch (e: any) {
+    console.error(
+      `[ModpackIndex Error] Failed to fetch starting page ${startPage}: ${e.message}`,
+    );
+    return;
+  }
+
+  if (!firstRes || !firstRes.data || firstRes.data.length === 0) {
+    return;
+  }
+
+  const totalMods = firstRes.meta?.total || 0;
+  const totalPages = firstRes.meta?.last_page || Math.ceil(totalMods / limit);
+
   let totalSaved = 0;
   const startTime = Date.now();
 
@@ -76,113 +81,338 @@ export async function crawlModpackIndex(startPageArg?: string) {
     return `${m}m ${s}s`;
   }
 
-  while (true) {
-    let res;
+  // Set of pages remaining to fetch
+  const pageQueue: number[] = [];
+  for (let p = startPage; p <= totalPages; p++) {
+    pageQueue.push(p);
+  }
+
+  let pagesProcessed = 0;
+  const totalPagesToProcess = pageQueue.length;
+
+  let cfSuccessCount = 0;
+  let cfFailCount = 0;
+  let cfTotalToCrawl = 0;
+  const cfStartTime = Date.now();
+
+  function drawProgressBar() {
+    const elapsed = (Date.now() - startTime) / 1000;
+    const speed = pagesProcessed / (elapsed || 0.1);
+    const remaining = totalPagesToProcess - pagesProcessed;
+    const eta = speed > 0 ? remaining / speed : 0;
+    const percentage = (pagesProcessed / totalPagesToProcess) * 100;
+
+    if ((global as any).isParallelCrawl) {
+      if (pagesProcessed % 5 === 0 || pagesProcessed === totalPagesToProcess) {
+        const cfProcessed = cfSuccessCount + cfFailCount;
+        console.log(
+          `[ModpackIndex Progress] ${percentage.toFixed(1)}% | Page: ${startPage + pagesProcessed - 1}/${totalPages} | Saved: ${totalSaved} | Speed: ${speed.toFixed(2)} p/s | ETA: ${formatTime(eta)} | CF Queue: ${cfQueue.length} pending (${cfProcessed}/${cfTotalToCrawl} done)`,
+        );
+      }
+      return;
+    }
+
+    const barWidth = 20;
+    const filledWidth = Math.round((percentage / 100) * barWidth);
+    const emptyWidth = Math.max(0, barWidth - filledWidth);
+    const barStr = "█".repeat(filledWidth) + "░".repeat(emptyWidth);
+
+    const progressLine =
+      `\r\x1b[K[MPI Crawl ${barStr}] ${percentage.toFixed(1)}% | ` +
+      `Page: ${startPage + pagesProcessed - 1}/${totalPages} | ` +
+      `Total Saved: ${totalSaved} | ` +
+      `Speed: ${speed.toFixed(2)} p/s | ` +
+      `ETA: ${formatTime(eta)}`;
+
+    const cfPercentage =
+      cfTotalToCrawl > 0 ? (cfSuccessCount / cfTotalToCrawl) * 100 : 0;
+    const cfFilledWidth = Math.round((cfPercentage / 100) * barWidth);
+    const cfEmptyWidth = Math.max(0, barWidth - cfFilledWidth);
+    const cfBarStr = "█".repeat(cfFilledWidth) + "░".repeat(cfEmptyWidth);
+
+    const cfElapsed = (Date.now() - cfStartTime) / 1000;
+    const cfSpeed = cfSuccessCount / (cfElapsed || 0.1);
+    const cfRemaining = cfTotalToCrawl - cfSuccessCount;
+    const cfEta = cfSpeed > 0 ? cfRemaining / cfSpeed : 0;
+
+    const cfMaxWorkers = getActiveProxies().length * 2 || 4;
+    const cfLine =
+      `\n\x1b[K[CF Crawl  ${cfBarStr}] ${cfPercentage.toFixed(1)}% | ` +
+      `Active: ${cfWorkersRunning}/${cfMaxWorkers} | ` +
+      `Pending: ${cfQueue.length} | ` +
+      `OK: ${cfSuccessCount} | ` +
+      `Err: ${cfFailCount} | ` +
+      `Proxies: ${getActiveProxies().length} | ` +
+      `Speed: ${cfSpeed.toFixed(1)}/s | ` +
+      `ETA: ${formatTime(cfEta)}`;
+
+    process.stdout.write(progressLine + cfLine + "\x1b[1A");
+  }
+
+  const cfQueue: number[] = [];
+  let cfWorkersRunning = 0;
+  const activeWorkers = new Map<string, number>();
+  let directWorkersRunning = 0;
+
+  async function spawnWorker(proxyUrl: string | null) {
+    if (proxyUrl) {
+      activeWorkers.set(proxyUrl, (activeWorkers.get(proxyUrl) || 0) + 1);
+    } else {
+      directWorkersRunning++;
+    }
+    cfWorkersRunning++;
+
     try {
-      res = await fetchWithRetry(`${MPI_BASE_URL}/mods?page=${page}&limit=${limit}`);
-    } catch (e: any) {
-      process.stdout.write("\n");
-      console.error(`[ModpackIndex Error] Failed to fetch page ${page}: ${e.message}. Saving progress.`);
-      break;
+      while (cfQueue.length > 0) {
+        if (proxyUrl && !getActiveProxies().includes(proxyUrl)) {
+          break; // Proxy was pruned, exit worker
+        }
+
+        const curseId = cfQueue.shift();
+        if (curseId === undefined) break;
+
+        try {
+          await crawlSingleCurseForge(curseId, proxyUrl);
+          cfSuccessCount++;
+        } catch (err: any) {
+          cfFailCount++;
+          cfQueue.push(curseId); // Defer indefinitely
+        }
+        drawProgressBar();
+        await sleep(0);
+      }
+    } finally {
+      if (proxyUrl) {
+        activeWorkers.set(proxyUrl, Math.max(0, (activeWorkers.get(proxyUrl) || 1) - 1));
+      } else {
+        directWorkersRunning = Math.max(0, directWorkersRunning - 1);
+      }
+      cfWorkersRunning--;
+      drawProgressBar();
+      triggerCfWorkers();
     }
+  }
 
-    if (!res || !res.data || res.data.length === 0) {
-      process.stdout.write("\n");
-      console.log("[ModpackIndex] No more data or empty response. Crawl complete!");
-      break;
-    }
+  function triggerCfWorkers() {
+    if (cfQueue.length === 0) return;
 
-    const totalMods = res.meta?.total || 0;
-    totalPages = res.meta?.last_page || Math.ceil(totalMods / limit);
+    loadProxies();
+    const activeProxies = getActiveProxies();
 
-    // Process mods batch
-    for (const mod of res.data) {
-      const mpiId = mod.id;
-      const curseId = mod.curse_info?.curse_id ?? null;
-      const modrinthList = mod.modrinth_info || [];
-
-      // Check if any mapped Modrinth project ID exists
-      let mappedToModrinth = false;
-      const statements: any[] = [];
-
-      for (const mrInfo of modrinthList) {
-        if (mrInfo.project_id) {
-          // Check if this project already exists in our DB
-          const existRes = await db.execute({
-            sql: "SELECT id FROM mods WHERE id = ? OR modrinth_id = ?",
-            args: [mrInfo.project_id, mrInfo.project_id]
-          });
-
-          if (existRes.rows.length > 0) {
-            mappedToModrinth = true;
-            // Update the existing Modrinth mod with mpi_id and curse_id
-            statements.push({
-              sql: "UPDATE mods SET mpi_id = ?, curse_id = ? WHERE id = ? OR modrinth_id = ?",
-              args: [mpiId, curseId, mrInfo.project_id, mrInfo.project_id]
-            });
-          }
+    if (activeProxies.length > 0) {
+      for (const proxy of activeProxies) {
+        const currentCount = activeWorkers.get(proxy) || 0;
+        const toSpawn = 2 - currentCount;
+        for (let i = 0; i < toSpawn; i++) {
+          if (cfQueue.length === 0) break;
+          spawnWorker(proxy);
         }
       }
+    } else {
+      const toSpawn = 4 - directWorkersRunning;
+      for (let i = 0; i < toSpawn; i++) {
+        if (cfQueue.length === 0) break;
+        spawnWorker(null);
+      }
+    }
+  }
 
-      // If not mapped/updated to an existing Modrinth project, and has CurseForge ID, treat as CF-only or new
-      if (!mappedToNonModrinth(mappedToModrinth) && curseId) {
-        const curseIdStr = String(curseId);
-        
-        // Insert/replace mod using CurseForge ID as mod ID
-        statements.push({
-          sql: `
-            INSERT OR REPLACE INTO mods (
-              id, mpi_id, curse_id, name, slug, summary, thumbnail_url,
-              download_count, popularity_rank, latest_release_date,
-              last_modified, last_updated, page_url, curseforge_url, fetched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `,
-          args: [
-            curseIdStr,
-            mpiId,
-            curseId,
-            mod.name,
-            mod.slug,
-            mod.summary || "",
-            mod.thumbnail_url || null,
-            mod.download_count || 0,
-            mod.popularity_rank || 0,
-            mod.latest_release_date || null,
-            mod.last_modified || null,
-            mod.last_updated || null,
-            mod.page_url || "",
-            mod.links?.curseforge || null,
-            new Date().toISOString()
-          ]
-        });
+  // Pre-load pending CurseForge-only mods from database into the worker queue
+  const pendingCfRes = await db.execute(
+    "SELECT curse_id FROM mods WHERE curse_id IS NOT NULL AND modrinth_id IS NULL AND description_compressed IS NULL",
+  );
+  let preloadedCount = 0;
+  for (const row of pendingCfRes.rows) {
+    if (row.curse_id) {
+      cfQueue.push(Number(row.curse_id));
+      preloadedCount++;
+    }
+  }
+  cfTotalToCrawl += preloadedCount;
 
-        // Relate categories
-        if (Array.isArray(mod.categories)) {
-          statements.push({
-            sql: "DELETE FROM mod_categories WHERE mod_id = ?",
-            args: [curseIdStr]
-          });
-          for (const cat of mod.categories) {
-            const catId = await getOrCreateCategory(cat.name, cat.slug);
-            statements.push({
-              sql: "INSERT OR IGNORE INTO mod_categories (mod_id, category_id) VALUES (?, ?)",
-              args: [curseIdStr, catId]
-            });
-          }
+  // Start background workers immediately to begin draining the queue
+  triggerCfWorkers();
+
+  drawProgressBar();
+
+  async function processPage(pNum: number, data: any[]) {
+    const statements: any[] = [];
+
+    // We execute DB lookup and metadata creation inside serialized DB executor
+    await runSerializedDb(async () => {
+      for (const mod of data) {
+        const mpiId = mod.id;
+        const curseId = mod.curse_info?.curse_id ?? null;
+        const modrinthList = mod.modrinth_info || [];
+        const modrinthIds = modrinthList
+          .map((m: any) => m.project_id)
+          .filter(Boolean);
+
+        // Find any existing rows in the DB matching any of this mod's identifiers
+        let sql = `
+          SELECT id, modrinth_id, curse_id, mpi_id 
+          FROM mods 
+          WHERE (curse_id IS NOT NULL AND curse_id = ?) 
+             OR (mpi_id IS NOT NULL AND mpi_id = ?)
+        `;
+        const args: any[] = [curseId !== null ? curseId : -999999, mpiId];
+
+        if (modrinthIds.length > 0) {
+          const placeholders = modrinthIds.map(() => "?").join(",");
+          sql += ` OR id IN (${placeholders}) OR modrinth_id IN (${placeholders})`;
+          args.push(...modrinthIds, ...modrinthIds);
         }
 
-        // Relate authors
-        if (Array.isArray(mod.authors)) {
-          statements.push({
-            sql: "DELETE FROM mod_authors WHERE mod_id = ?",
-            args: [curseIdStr]
-          });
-          for (const aut of mod.authors) {
-            const autId = await getOrCreateAuthor(aut.name, undefined, aut.url || undefined);
+        const existRes = await db.execute({ sql, args });
+        const matchedRows = existRes.rows;
+
+        // Determine canonicalModrinthId
+        const modrinthIdFromPage = modrinthIds[0] || null;
+        const modrinthIdFromDb =
+          matchedRows.find((r) => r.modrinth_id)?.modrinth_id || null;
+        const canonicalModrinthId = modrinthIdFromPage || modrinthIdFromDb;
+
+        if (canonicalModrinthId) {
+          const canonicalId = canonicalModrinthId;
+
+          // Delete duplicate rows (different primary key id) to prevent UNIQUE conflicts on curse_id/mpi_id
+          for (const row of matchedRows) {
+            const rowId = row.id as string;
+            if (rowId !== canonicalId) {
+              statements.push({
+                sql: "DELETE FROM mods WHERE id = ?",
+                args: [rowId],
+              });
+            }
+          }
+
+          const existsInDb = matchedRows.some((r) => r.id === canonicalId);
+
+          if (existsInDb) {
             statements.push({
-              sql: "INSERT OR IGNORE INTO mod_authors (mod_id, author_id, role) VALUES (?, ?, ?)",
-              args: [curseIdStr, autId, null]
+              sql: "UPDATE mods SET mpi_id = ?, curse_id = ? WHERE id = ?",
+              args: [mpiId, curseId, canonicalId],
             });
+          } else {
+            statements.push({
+              sql: `
+                INSERT INTO mods (
+                  id, modrinth_id, mpi_id, curse_id, name, slug, fetched_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  mpi_id = excluded.mpi_id,
+                  curse_id = excluded.curse_id,
+                  name = COALESCE(mods.name, excluded.name),
+                  slug = COALESCE(mods.slug, excluded.slug),
+                  fetched_at = excluded.fetched_at
+              `,
+              args: [
+                canonicalId,
+                canonicalId,
+                mpiId,
+                curseId,
+                mod.name,
+                mod.slug,
+                new Date().toISOString(),
+              ],
+            });
+          }
+        } else {
+          // CurseForge-only or MPI-only mod
+          const canonicalId =
+            curseId !== null ? String(curseId) : String(mpiId);
+
+          // Delete duplicate rows
+          for (const row of matchedRows) {
+            const rowId = row.id as string;
+            if (rowId !== canonicalId) {
+              statements.push({
+                sql: "DELETE FROM mods WHERE id = ?",
+                args: [rowId],
+              });
+            }
+          }
+
+          statements.push({
+            sql: `
+              INSERT INTO mods (
+                id, mpi_id, curse_id, name, slug, summary, thumbnail_url,
+                download_count, popularity_rank, latest_release_date,
+                last_modified, last_updated, page_url, curseforge_url, fetched_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET
+                mpi_id = excluded.mpi_id,
+                curse_id = excluded.curse_id,
+                name = COALESCE(excluded.name, mods.name),
+                slug = COALESCE(excluded.slug, mods.slug),
+                summary = COALESCE(excluded.summary, mods.summary),
+                thumbnail_url = COALESCE(excluded.thumbnail_url, mods.thumbnail_url),
+                download_count = COALESCE(excluded.download_count, mods.download_count),
+                popularity_rank = COALESCE(excluded.popularity_rank, mods.popularity_rank),
+                latest_release_date = COALESCE(excluded.latest_release_date, mods.latest_release_date),
+                last_modified = COALESCE(excluded.last_modified, mods.last_modified),
+                last_updated = COALESCE(excluded.last_updated, mods.last_updated),
+                page_url = COALESCE(excluded.page_url, mods.page_url),
+                curseforge_url = COALESCE(excluded.curseforge_url, mods.curseforge_url),
+                fetched_at = excluded.fetched_at
+            `,
+            args: [
+              canonicalId,
+              mpiId,
+              curseId,
+              mod.name,
+              mod.slug,
+              mod.summary || "",
+              mod.thumbnail_url || null,
+              mod.download_count || 0,
+              mod.popularity_rank || 0,
+              mod.latest_release_date || null,
+              mod.last_modified || null,
+              mod.last_updated || null,
+              mod.page_url || "",
+              mod.links?.curseforge || null,
+              new Date().toISOString(),
+            ],
+          });
+
+          // Relate categories
+          if (Array.isArray(mod.categories)) {
+            statements.push({
+              sql: "DELETE FROM mod_categories WHERE mod_id = ?",
+              args: [canonicalId],
+            });
+            for (const cat of mod.categories) {
+              const catId = await getOrCreateCategory(cat.name, cat.slug);
+              statements.push({
+                sql: "INSERT OR IGNORE INTO mod_categories (mod_id, category_id) VALUES (?, ?)",
+                args: [canonicalId, catId],
+              });
+            }
+          }
+
+          // Relate authors
+          if (Array.isArray(mod.authors)) {
+            statements.push({
+              sql: "DELETE FROM mod_authors WHERE mod_id = ?",
+              args: [canonicalId],
+            });
+            for (const aut of mod.authors) {
+              const autId = await getOrCreateAuthor(
+                aut.name,
+                undefined,
+                aut.url || undefined,
+              );
+              statements.push({
+                sql: "INSERT OR IGNORE INTO mod_authors (mod_id, author_id, role) VALUES (?, ?, ?)",
+                args: [canonicalId, autId, null],
+              });
+            }
+          }
+
+          // Queue for CurseForge widget crawling
+          if (curseId !== null) {
+            cfQueue.push(curseId);
+            cfTotalToCrawl++;
           }
         }
       }
@@ -191,48 +421,60 @@ export async function crawlModpackIndex(startPageArg?: string) {
         try {
           await db.batch(statements, "write");
         } catch (dbErr: any) {
-          console.error(`[MPI DB Error] Failed to write mod ${mod.slug}:`, dbErr.message);
+          console.error(
+            `\n[MPI DB Error] Failed to write page ${pNum}:`,
+            dbErr.message,
+          );
         }
       }
-    }
 
-    totalSaved += res.data.length;
-
-    // Save progress
-    await db.execute({
-      sql: "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-      args: ["last_fetched_page_mpi", String(page)]
+      // Save progress metadata
+      await db.execute({
+        sql: "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+        args: ["last_fetched_page_mpi", String(pNum)],
+      });
     });
 
-    // Draw progress bar
-    const elapsed = (Date.now() - startTime) / 1000;
-    const speed = (page - startPage + 1) / (elapsed || 0.1);
-    const remainingPages = totalPages - page;
-    const eta = speed > 0 ? remainingPages / speed : 0;
-    const percentage = ((page - startPage + 1) / (totalPages - startPage + 1 || 1)) * 100;
+    totalSaved += data.length;
+    pagesProcessed++;
+    drawProgressBar();
 
-    const barWidth = 20;
-    const filledWidth = Math.round((percentage / 100) * barWidth);
-    const emptyWidth = Math.max(0, barWidth - filledWidth);
-    const barStr = "█".repeat(filledWidth) + "░".repeat(emptyWidth);
+    triggerCfWorkers();
+  }
 
-    const progressLine =
-      `\r[MPI Crawl ${barStr}] ${percentage.toFixed(1)}% | ` +
-      `Page: ${page}/${totalPages} | ` +
-      `Total Saved: ${totalSaved} | ` +
-      `Speed: ${speed.toFixed(2)} p/s | ` +
-      `ETA: ${formatTime(eta)}`;
+  async function worker() {
+    while (pageQueue.length > 0) {
+      const page = pageQueue.shift();
+      if (page === undefined) break;
 
-    process.stdout.write("\r\x1b[K" + progressLine);
-
-    if (page >= totalPages) {
-      process.stdout.write("\n");
-      console.log("[ModpackIndex] Reached final page!");
-      break;
+      try {
+        const res = await fetchWithRetry(
+          `${MPI_BASE_URL}/mods?page=${page}&limit=${limit}`,
+        );
+        if (res && res.data && res.data.length > 0) {
+          await processPage(page, res.data);
+        }
+      } catch (e: any) {
+        console.error(
+          `\n[ModpackIndex Error] Failed to fetch page ${page}: ${e.message}`,
+        );
+      }
+      await sleep(1000);
     }
+  }
 
-    page++;
-    await sleep(1000); // Respect MPI 3,600 requests/hour limit
+  // Spawn 2 concurrent page-crawling workers!
+  const workerCount = Math.min(2, totalPagesToProcess);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  // Wait for background CurseForge workers to complete
+  while (cfWorkersRunning > 0 || cfQueue.length > 0) {
+    await sleep(200);
+  }
+
+  // Move cursor down past the 2-line progress bar
+  if (!(global as any).isParallelCrawl) {
+    process.stdout.write("\n\n");
   }
 }
 
