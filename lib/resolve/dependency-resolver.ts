@@ -44,20 +44,24 @@ export async function resolveDependencies(
     const entry = queue.shift()!;
 
     for (const dep of entry.deps) {
+      // Incompatible deps → only a real conflict if that mod is already in the pack.
+      // Modrinth metadata often lists "incompatible" mods (e.g. Embeddium lists Rubidium)
+      // even when neither is installed — we should NOT warn unless there's an actual clash.
+      if (dep.dependencyType === "incompatible") {
+        if (existingProjectIds.has(dep.projectId)) {
+          conflicts.push({
+            sourceProjectId: entry.sourceProjectId,
+            targetProjectId: dep.projectId,
+            dependencyType: "incompatible",
+            reason: `${dep.projectId} is marked incompatible by ${entry.sourceProjectId}`,
+          });
+        }
+        continue;
+      }
+
       // Skip if already processed or already in the pack.
       if (visited.has(dep.projectId)) continue;
       visited.add(dep.projectId);
-
-      // Incompatible deps → conflict, never add.
-      if (dep.dependencyType === "incompatible") {
-        conflicts.push({
-          sourceProjectId: entry.sourceProjectId,
-          targetProjectId: dep.projectId,
-          dependencyType: "incompatible",
-          reason: `${dep.projectId} is marked incompatible by ${entry.sourceProjectId}`,
-        });
-        continue;
-      }
 
       // Only auto-add `required` deps. Skip optional/embedded.
       if (dep.dependencyType !== "required") continue;

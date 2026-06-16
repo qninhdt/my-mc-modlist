@@ -1,6 +1,7 @@
 import { cached } from "./cache";
 import type { ModpackIndexMod } from "./types";
 import { mapCurseforgeCategory } from "./normalize";
+import { isSqliteDbAvailable, localGetMpiMod, localSearchMpiMods } from "./sqlite-helper";
 
 // ModpackIndex v1 client. Used ONLY for cross-platform badge enrichment (does this
 // mod also exist on CurseForge?) — NOT as a search engine (it can't combine
@@ -35,6 +36,13 @@ export async function searchMods(
   page: number = 1,
   limit: number = 20
 ): Promise<{ data: ModpackIndexMod[]; total: number } | null> {
+  if (isSqliteDbAvailable()) {
+    const allMatching = await localSearchMpiMods(name || "", 250);
+    const offset = (page - 1) * limit;
+    const sliced = allMatching.slice(offset, offset + limit);
+    return { data: sliced, total: allMatching.length };
+  }
+
   const queryTerm = name?.toLowerCase().trim() ?? "";
   const key = `mpi:search:${queryTerm}:${page}:${limit}`;
   return cached("search", key, async () => {
@@ -55,6 +63,11 @@ export async function searchMods(
 }
 
 export async function getMod(modId: number): Promise<ModpackIndexMod | null> {
+  if (isSqliteDbAvailable()) {
+    const local = await localGetMpiMod(modId);
+    if (local) return local;
+  }
+
   return cached("detail", `mpi:mod:${modId}`, async () => {
     const body = await mpiFetch<{ data: ModpackIndexMod }>(`/mod/${modId}`);
     return body?.data ?? null;
@@ -69,18 +82,22 @@ export async function searchAndFilterMpiMods(
 ): Promise<ModpackIndexMod[]> {
   const cacheKey = `mpi:filtered-search:${query}:${(loaders ?? []).join(",")}:${(versions ?? []).join(",")}:${(categories ?? []).join(",")}`;
   return cached("search", cacheKey, async () => {
-    const allMods: ModpackIndexMod[] = [];
-    const limit = 100;
-
-    // Fetch up to 3 pages of 100 results to cover the max 250 matches
-    for (let page = 1; page <= 3; page++) {
-      const res = await searchMods(query, page, limit);
-      if (!res || !res.data || res.data.length === 0) {
-        break;
-      }
-      allMods.push(...res.data);
-      if (res.data.length < limit || allMods.length >= 250) {
-        break;
+    let allMods: ModpackIndexMod[] = [];
+    
+    if (isSqliteDbAvailable()) {
+      allMods = await localSearchMpiMods(query, 250);
+    } else {
+      const limit = 100;
+      // Fetch up to 3 pages of 100 results to cover the max 250 matches
+      for (let page = 1; page <= 3; page++) {
+        const res = await searchMods(query, page, limit);
+        if (!res || !res.data || res.data.length === 0) {
+          break;
+        }
+        allMods.push(...res.data);
+        if (res.data.length < limit || allMods.length >= 250) {
+          break;
+        }
       }
     }
 

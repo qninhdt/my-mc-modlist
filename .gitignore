@@ -42,4 +42,13 @@ next-env.d.ts
 
 .claude
 .agent
+.agents
+.gemini
 plans
+
+# sqlite databases
+*.db
+/data/
+
+# proxies
+/proxy/

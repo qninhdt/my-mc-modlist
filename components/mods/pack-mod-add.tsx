@@ -118,8 +118,8 @@ export function PackModAdd({
           summary: "",
           iconUrl: info?.iconUrl ?? null,
           categories: [],
-          clientSide: "unknown",
-          serverSide: "unknown",
+          clientSide: info?.clientSide ?? "unknown",
+          serverSide: info?.serverSide ?? "unknown",
           curseforgeManual: false,
         },
         versionPin: {

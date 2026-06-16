@@ -1,6 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { getProjectVersions } from "@/lib/api/modrinth";
 import { getMod } from "@/lib/api/modpackindex";
+import { isSqliteDbAvailable, localGetCurseforgeModFiles } from "@/lib/api/sqlite-helper";
 
 export const runtime = "nodejs";
 
@@ -34,16 +35,28 @@ export async function GET(
       }
 
       const curseId = mpiMod.curse_info.curse_id;
-      const res = await fetch(`https://api.cfwidget.com/${curseId}`, {
-        headers: { "User-Agent": USER_AGENT },
-        next: { revalidate: 3600 },
-      });
-      if (!res.ok) {
-        return NextResponse.json({ versions: [] });
+      let files: any[] = [];
+      if (isSqliteDbAvailable()) {
+        const localFiles = await localGetCurseforgeModFiles(curseId);
+        if (localFiles) {
+          files = localFiles;
+        }
       }
 
-      const cfWidgetData = await res.json();
-      const files = cfWidgetData?.files || [];
+      if (files.length === 0) {
+        try {
+          const res = await fetch(`https://api.cfwidget.com/${curseId}`, {
+            headers: { "User-Agent": USER_AGENT },
+            next: { revalidate: 3600 },
+          });
+          if (res.ok) {
+            const cfWidgetData = await res.json();
+            files = cfWidgetData?.files || [];
+          }
+        } catch (err) {
+          console.warn("Failed to fetch CurseForge versions from widget API:", err);
+        }
+      }
 
       const versions = files.map((f: any) => {
         const gameVersions = f.versions.filter((v: string) => isMinecraftVersion(v));

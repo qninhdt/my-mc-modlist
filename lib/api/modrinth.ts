@@ -5,6 +5,7 @@ import type {
   ModrinthVersion,
   ModrinthTeamMember,
 } from "./types";
+import { isSqliteDbAvailable, localGetModrinthProject, localSearchModrinthProjects } from "./sqlite-helper";
 
 // Modrinth v2 client. SERVER-SIDE ONLY: Modrinth strictly enforces a descriptive
 // User-Agent, which browsers cannot set (forbidden header). Every read flows
@@ -73,6 +74,47 @@ function searchKey(params: SearchParams): string {
 export async function searchProjects(
   params: SearchParams
 ): Promise<ModrinthSearchResponse> {
+  if (isSqliteDbAvailable()) {
+    const queryVal = params.query || "";
+    const allHits = await localSearchModrinthProjects(queryVal, 500);
+    
+    let filtered = allHits;
+    if (params.loaders?.length) {
+      filtered = filtered.filter(hit => 
+        hit.categories?.some(cat => params.loaders!.includes(cat))
+      );
+    }
+    if (params.categories?.length) {
+      filtered = filtered.filter(hit =>
+        hit.categories?.some(cat => params.categories!.includes(cat))
+      );
+    }
+    if (params.versions?.length) {
+      filtered = filtered.filter(hit =>
+        hit.game_versions?.some(ver => params.versions!.includes(ver))
+      );
+    }
+
+    // Handle sorting
+    const sortIndex = params.index ?? "relevance";
+    if (sortIndex === "downloads") {
+      filtered.sort((a, b) => b.downloads - a.downloads);
+    } else if (sortIndex === "follows") {
+      filtered.sort((a, b) => (b.follows ?? 0) - (a.follows ?? 0));
+    }
+    
+    const offset = params.offset ?? 0;
+    const limit = params.limit ?? 30;
+    const hits = filtered.slice(offset, offset + limit);
+
+    return {
+      hits,
+      offset,
+      limit,
+      total_hits: filtered.length,
+    };
+  }
+
   return cached("search", `modrinth:search:${searchKey(params)}`, async () => {
     const qs = new URLSearchParams();
     if (params.query) qs.set("query", params.query);
@@ -86,6 +128,11 @@ export async function searchProjects(
 }
 
 export async function getProject(idOrSlug: string): Promise<ModrinthProject> {
+  if (isSqliteDbAvailable()) {
+    const local = await localGetModrinthProject(idOrSlug);
+    if (local) return local;
+  }
+
   return cached("detail", `modrinth:project:${idOrSlug}`, () =>
     modrinthFetch<ModrinthProject>(`/project/${encodeURIComponent(idOrSlug)}`)
   );

@@ -296,8 +296,8 @@ export function AddToPackDialog({
           summary: "",
           iconUrl: info?.iconUrl ?? null,
           categories: [],
-          clientSide: "unknown",
-          serverSide: "unknown",
+          clientSide: info?.clientSide ?? "unknown",
+          serverSide: info?.serverSide ?? "unknown",
           curseforgeManual: false,
         },
         versionPin: {
@@ -529,15 +529,35 @@ export function AddToPackDialog({
                   <AlertTriangle className="size-4" />
                   Incompatible Mods ({pendingAdd.result.deps.conflicts.length})
                 </h5>
-                <ul className="space-y-1">
-                  {pendingAdd.result.deps.conflicts.map((c) => (
-                    <li
-                      key={`${c.sourceProjectId}-${c.targetProjectId}`}
-                      className="rounded border border-red-200 bg-red-50 dark:border-red-900/30 dark:bg-red-950/20 px-2.5 py-1.5 text-[11px] text-red-800 dark:text-red-200"
-                    >
-                      {c.reason}
-                    </li>
-                  ))}
+                <ul className="space-y-1.5">
+                  {pendingAdd.result.deps.conflicts.map((c) => {
+                    const targetInfo = pendingAdd.result.depProjectInfos[c.targetProjectId];
+                    const sourceInfo = pendingAdd.result.depProjectInfos[c.sourceProjectId];
+                    return (
+                      <li
+                        key={`${c.sourceProjectId}-${c.targetProjectId}`}
+                        className="rounded border border-red-200 bg-red-50 dark:border-red-900/30 dark:bg-red-950/20 px-2.5 py-2 text-[11px] text-red-800 dark:text-red-200 space-y-1"
+                      >
+                        <div className="flex items-center gap-1.5">
+                          {targetInfo?.iconUrl ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={targetInfo.iconUrl} alt="" className="size-4 rounded object-cover shrink-0" loading="lazy" />
+                          ) : (
+                            <div className="size-4 rounded bg-red-200 dark:bg-red-900 shrink-0" />
+                          )}
+                          <span className="font-semibold">{targetInfo?.name ?? c.targetProjectId}</span>
+                          <span className="opacity-70">is incompatible with</span>
+                          {sourceInfo?.iconUrl ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={sourceInfo.iconUrl} alt="" className="size-4 rounded object-cover shrink-0" loading="lazy" />
+                          ) : (
+                            <div className="size-4 rounded bg-red-200 dark:bg-red-900 shrink-0" />
+                          )}
+                          <span className="font-semibold">{sourceInfo?.name ?? c.sourceProjectId}</span>
+                        </div>
+                      </li>
+                    );
+                  })}
                 </ul>
               </div>
             )}

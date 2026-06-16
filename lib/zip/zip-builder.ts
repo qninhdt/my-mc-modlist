@@ -76,11 +76,37 @@ export async function buildModpackZip(
           throw new Error("No download URL resolved for this mod");
         }
 
-        updateProgress("fetching", `Downloading ${mod.name}`);
+        const isCacheable = url.startsWith("https://cdn.modrinth.com/");
+        let response: Response | undefined;
+        let cache: Cache | undefined;
 
-        const response = await fetch(url);
-        if (!response.ok) {
-          throw new Error(`Failed to download: HTTP ${response.status} ${response.statusText}`);
+        if (isCacheable && typeof window !== "undefined" && "caches" in window) {
+          try {
+            cache = await window.caches.open("mmcm-mod-jars");
+            const cachedRes = await cache.match(url);
+            if (cachedRes) {
+              response = cachedRes;
+            }
+          } catch (e) {
+            console.warn("Failed to read from Cache Storage:", e);
+          }
+        }
+
+        if (response) {
+          updateProgress("fetching", `Using cached ${mod.name}`);
+        } else {
+          updateProgress("fetching", `Downloading ${mod.name}`);
+          response = await fetch(url);
+          if (!response.ok) {
+            throw new Error(`Failed to download: HTTP ${response.status} ${response.statusText}`);
+          }
+          if (cache) {
+            try {
+              await cache.put(url, response.clone());
+            } catch (e) {
+              console.warn("Failed to write to Cache Storage:", e);
+            }
+          }
         }
 
         const blob = await response.blob();

@@ -3,6 +3,7 @@ import { getProject, getProjectMembers } from "@/lib/api/modrinth";
 import { searchMods, getMod } from "@/lib/api/modpackindex";
 import { normalizeProject, normalizeCurseforgeOnly, mapCurseforgeCategory } from "@/lib/api/normalize";
 import type { ModpackIndexMod } from "@/lib/api/types";
+import { isSqliteDbAvailable, localGetCurseforgeMod } from "@/lib/api/sqlite-helper";
 
 export const runtime = "nodejs";
 
@@ -31,20 +32,26 @@ export async function GET(
         return NextResponse.json({ error: "Mod not found on CurseForge index" }, { status: 404 });
       }
 
-      // Best-effort: fetch full CurseForge description, loaders, and links from cfwidget
+      // Best-effort: fetch full CurseForge description, loaders, and links from local DB or cfwidget
       let cfWidgetData: any = null;
       const curseId = mpiMod.curse_info?.curse_id;
       if (curseId) {
-        try {
-          const res = await fetch(`https://api.cfwidget.com/${curseId}`, {
-            headers: { "User-Agent": "qninhdt/my-mc-modlist/0.1.0" },
-            next: { revalidate: 3600 },
-          });
-          if (res.ok) {
-            cfWidgetData = await res.json();
+        if (isSqliteDbAvailable()) {
+          cfWidgetData = await localGetCurseforgeMod(curseId);
+        }
+
+        if (!cfWidgetData) {
+          try {
+            const res = await fetch(`https://api.cfwidget.com/${curseId}`, {
+              headers: { "User-Agent": "qninhdt/my-mc-modlist/0.1.0" },
+              next: { revalidate: 3600 },
+            });
+            if (res.ok) {
+              cfWidgetData = await res.json();
+            }
+          } catch (err) {
+            console.warn("Failed to fetch CFWidget data:", err);
           }
-        } catch (err) {
-          console.warn("Failed to fetch CFWidget data:", err);
         }
       }
 

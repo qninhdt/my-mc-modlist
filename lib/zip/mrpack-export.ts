@@ -102,7 +102,19 @@ export async function exportToMrpack(
           }
 
           const blob = await response.blob();
-          zip.file(`overrides/mods/${safeName}`, blob);
+
+          // Determine correct overrides folder based on side flags
+          const clientSide = (mod.clientSide || "unknown").toLowerCase();
+          const serverSide = (mod.serverSide || "unknown").toLowerCase();
+
+          let folder = "overrides";
+          if (clientSide === "unsupported") {
+            folder = "server-overrides";
+          } else if (serverSide === "unsupported") {
+            folder = "client-overrides";
+          }
+
+          zip.file(`${folder}/mods/${safeName}`, blob);
         } catch (err: any) {
           console.error(`Error embedding manual mod ${mod.name}:`, err);
           failedMods.push({

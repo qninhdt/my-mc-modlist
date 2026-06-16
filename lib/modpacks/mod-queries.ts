@@ -49,7 +49,16 @@ export function useAddPackMod(packId: string) {
 export type ResolveResult = {
   resolved: ResolvedVersion | null;
   deps: DependencyResolutionResult;
-  depProjectInfos: Record<string, { name: string; slug: string; iconUrl: string | null }>;
+  depProjectInfos: Record<
+    string,
+    {
+      name: string;
+      slug: string;
+      iconUrl: string | null;
+      clientSide: string;
+      serverSide: string;
+    }
+  >;
   error?: string;
 };
 

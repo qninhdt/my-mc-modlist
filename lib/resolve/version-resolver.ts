@@ -2,6 +2,7 @@ import type { ModrinthVersion, ModrinthVersionType } from "@/lib/api/types";
 import { getProjectVersions, getVersion } from "@/lib/api/modrinth";
 import { getMod } from "@/lib/api/modpackindex";
 import type { ResolvedVersion, ResolvedDependencyRef } from "./types";
+import { isSqliteDbAvailable, localGetCurseforgeModFiles } from "@/lib/api/sqlite-helper";
 
 const USER_AGENT = "qninhdt/my-mc-modlist/0.1.0 (mc-modlist on vercel)";
 
@@ -99,13 +100,28 @@ async function resolveCurseforgeLatest(
   if (!mpiMod || !mpiMod.curse_info?.curse_id) return null;
 
   const curseId = mpiMod.curse_info.curse_id;
-  const res = await fetch(`https://api.cfwidget.com/${curseId}`, {
-    headers: { "User-Agent": USER_AGENT },
-  });
-  if (!res.ok) return null;
+  let files: any[] = [];
+  if (isSqliteDbAvailable()) {
+    const localFiles = await localGetCurseforgeModFiles(curseId);
+    if (localFiles) {
+      files = localFiles;
+    }
+  }
 
-  const cfWidgetData = await res.json();
-  const files = cfWidgetData?.files || [];
+  if (files.length === 0) {
+    try {
+      const res = await fetch(`https://api.cfwidget.com/${curseId}`, {
+        headers: { "User-Agent": USER_AGENT },
+      });
+      if (res.ok) {
+        const cfWidgetData = await res.json();
+        files = cfWidgetData?.files || [];
+      }
+    } catch (err) {
+      console.warn("Failed to fetch CFWidget files:", err);
+    }
+  }
+  if (files.length === 0) return null;
 
   const versions: ModrinthVersion[] = files.map((f: any) => {
     const gameVersions = f.versions.filter((v: string) => isMinecraftVersion(v));
@@ -195,13 +211,28 @@ async function resolveCurseforgeSpecificVersion(
   if (!mpiMod || !mpiMod.curse_info?.curse_id) return null;
 
   const curseId = mpiMod.curse_info.curse_id;
-  const res = await fetch(`https://api.cfwidget.com/${curseId}`, {
-    headers: { "User-Agent": USER_AGENT },
-  });
-  if (!res.ok) return null;
+  let files: any[] = [];
+  if (isSqliteDbAvailable()) {
+    const localFiles = await localGetCurseforgeModFiles(curseId);
+    if (localFiles) {
+      files = localFiles;
+    }
+  }
 
-  const cfWidgetData = await res.json();
-  const files = cfWidgetData?.files || [];
+  if (files.length === 0) {
+    try {
+      const res = await fetch(`https://api.cfwidget.com/${curseId}`, {
+        headers: { "User-Agent": USER_AGENT },
+      });
+      if (res.ok) {
+        const cfWidgetData = await res.json();
+        files = cfWidgetData?.files || [];
+      }
+    } catch (err) {
+      console.warn("Failed to fetch CFWidget files:", err);
+    }
+  }
+  if (files.length === 0) return null;
   const f = files.find((file: any) => String(file.id) === versionId);
   if (!f) return null;
 

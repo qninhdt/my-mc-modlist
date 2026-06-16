@@ -62,24 +62,52 @@ export async function POST(request: NextRequest) {
       existingSet
     );
 
-    // 3. Fetch project info for all auto-added deps (for display in the dialog).
-    const depProjectInfos: Record<string, { name: string; slug: string; iconUrl: string | null }> = {};
-    for (const dep of deps.added) {
+    // 3. Fetch project info for all auto-added deps AND conflict mods (for display in the dialog).
+    const depProjectInfos: Record<
+      string,
+      {
+        name: string;
+        slug: string;
+        iconUrl: string | null;
+        clientSide: string;
+        serverSide: string;
+      }
+    > = {};
+
+    // Collect all project IDs that need name resolution
+    const projectIdsToFetch = new Set<string>();
+    for (const dep of deps.added) projectIdsToFetch.add(dep.projectId);
+    for (const conflict of deps.conflicts) {
+      projectIdsToFetch.add(conflict.targetProjectId);
+      projectIdsToFetch.add(conflict.sourceProjectId);
+    }
+
+    for (const pid of projectIdsToFetch) {
       try {
-        const proj = await getProject(dep.projectId);
-        depProjectInfos[dep.projectId] = {
+        const proj = await getProject(pid);
+        depProjectInfos[pid] = {
           name: proj.title,
           slug: proj.slug,
-          iconUrl: proj.icon_url,
+          iconUrl: proj.icon_url ?? null,
+          clientSide: proj.client_side || "unknown",
+          serverSide: proj.server_side || "unknown",
         };
       } catch {
-        depProjectInfos[dep.projectId] = {
-          name: dep.projectId,
+        depProjectInfos[pid] = {
+          name: pid,
           slug: "",
           iconUrl: null,
+          clientSide: "unknown",
+          serverSide: "unknown",
         };
       }
     }
+
+    // Re-write conflict reasons using real mod names
+    deps.conflicts = deps.conflicts.map((c) => ({
+      ...c,
+      reason: `"${depProjectInfos[c.targetProjectId]?.name ?? c.targetProjectId}" is marked incompatible by "${depProjectInfos[c.sourceProjectId]?.name ?? c.sourceProjectId}"`,
+    }));
 
     return NextResponse.json({
       resolved,
