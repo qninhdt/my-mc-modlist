@@ -3,6 +3,7 @@ import path from "path";
 import zlib from "zlib";
 import { createClient } from "@libsql/client";
 import type { ModpackIndexMod, ModrinthProject, ModrinthSearchHit, SideSupport, ModrinthVersion, ModrinthTeamMember } from "./types";
+import { cached } from "./cache";
 
 
 // Returns true if Turso database is available via environment variables
@@ -25,6 +26,16 @@ function getDb() {
     clientInstance = createClient({ url, authToken });
   }
   return clientInstance;
+}
+
+// Caches count query results in Redis for 6 hours to completely bypass expensive Full-Table Scans on pagination clicks
+async function getCachedCount(sql: string, args: any[]): Promise<number> {
+  const cacheKey = `sql:count:${sql.trim().toLowerCase()}:${JSON.stringify(args)}`;
+  return cached("detail", cacheKey, async () => {
+    const db = getDb();
+    const res = await db.execute({ sql, args });
+    return Number(res.rows[0]?.count ?? 0);
+  });
 }
 
 // Mapper for ModpackIndexMod
@@ -214,16 +225,12 @@ export async function localSearchMpiModsPaged(
       orderBy = queryTerm ? "rank" : "m.download_count DESC";
     }
 
-    // 1. Get total count
+    // 1. Get total count (cached in Redis to bypass Full-Table Scans on pagination)
     const countSql = queryTerm
       ? `SELECT COUNT(*) as count FROM mods_fts f JOIN mods m ON f.rowid = m.rowid ${whereClause}`
       : `SELECT COUNT(*) as count FROM mods m ${whereClause}`;
 
-    const countRes = await db.execute({
-      sql: countSql,
-      args
-    });
-    const total = Number(countRes.rows[0]?.count ?? 0);
+    const total = await getCachedCount(countSql, args);
 
     if (total === 0) {
       return { hits: [], total: 0 };
@@ -438,16 +445,12 @@ export async function localSearchModrinthProjects(
       orderBy = queryTerm ? "rank" : "m.download_count DESC";
     }
 
-    // 1. Get total count
+    // 1. Get total count (cached in Redis to bypass Full-Table Scans on pagination)
     const countSql = queryTerm
       ? `SELECT COUNT(*) as count FROM mods_fts f JOIN mods m ON f.rowid = m.rowid ${whereClause}`
       : `SELECT COUNT(*) as count FROM mods m ${whereClause}`;
 
-    const countRes = await db.execute({
-      sql: countSql,
-      args
-    });
-    const total = Number(countRes.rows[0]?.count ?? 0);
+    const total = await getCachedCount(countSql, args);
 
     if (total === 0) {
       return { hits: [], total: 0 };
