@@ -242,9 +242,44 @@ export async function localSearchMpiModsPaged(
     }
 
     // 1. Get total count (cached in Redis to bypass Full-Table Scans on pagination)
-    const countSql = queryTerm
-      ? `SELECT COUNT(*) as count FROM mods_fts f JOIN mods m ON f.rowid = m.rowid ${whereClause}`
-      : `SELECT COUNT(*) as count FROM mods m ${whereClause}`;
+    let countSql = "";
+    if (queryTerm) {
+      countSql = `SELECT COUNT(*) as count FROM mods_fts f JOIN mods m ON f.rowid = m.rowid ${whereClause}`;
+    } else {
+      const hasLoaders = opts.loaders?.length;
+      const hasVersions = opts.versions?.length;
+      const hasCategories = opts.categories?.length;
+
+      if (hasLoaders || hasVersions || hasCategories) {
+        const joinParts: string[] = ["mods m"];
+        const countWhereParts: string[] = ["m.curse_id IS NOT NULL"];
+
+        if (hasLoaders) {
+          joinParts.push("JOIN mod_loaders ml ON m.id = ml.mod_id");
+          joinParts.push("JOIN loaders l ON ml.loader_id = l.id");
+          const placeholders = opts.loaders!.map(() => "?").join(", ");
+          countWhereParts.push(`l.name IN (${placeholders})`);
+        }
+
+        if (hasVersions) {
+          joinParts.push("JOIN mod_minecraft_versions mv ON m.id = mv.mod_id");
+          joinParts.push("JOIN minecraft_versions v ON mv.minecraft_version_id = v.id");
+          const placeholders = opts.versions!.map(() => "?").join(", ");
+          countWhereParts.push(`v.version IN (${placeholders})`);
+        }
+
+        if (hasCategories) {
+          joinParts.push("JOIN mod_categories mc ON m.id = mc.mod_id");
+          joinParts.push("JOIN categories c ON mc.category_id = c.id");
+          const placeholders = opts.categories!.map(() => "?").join(", ");
+          countWhereParts.push(`c.slug IN (${placeholders})`);
+        }
+
+        countSql = `SELECT COUNT(DISTINCT m.id) as count FROM ${joinParts.join(" ")} WHERE ${countWhereParts.join(" AND ")}`;
+      } else {
+        countSql = `SELECT COUNT(*) as count FROM mods m ${whereClause}`;
+      }
+    }
 
     const total = await getCachedCount(countSql, args);
 
@@ -478,9 +513,55 @@ export async function localSearchModrinthProjects(
     }
 
     // 1. Get total count (cached in Redis to bypass Full-Table Scans on pagination)
-    const countSql = queryTerm
-      ? `SELECT COUNT(*) as count FROM mods_fts f JOIN mods m ON f.rowid = m.rowid ${whereClause}`
-      : `SELECT COUNT(*) as count FROM mods m ${whereClause}`;
+    let countSql = "";
+    if (queryTerm) {
+      countSql = `SELECT COUNT(*) as count FROM mods_fts f JOIN mods m ON f.rowid = m.rowid ${whereClause}`;
+    } else {
+      const hasLoaders = opts.loaders?.length;
+      const hasVersions = opts.versions?.length;
+      const hasCategories = opts.categories?.length;
+
+      if (hasLoaders || hasVersions || hasCategories) {
+        const joinParts: string[] = ["mods m"];
+        const countWhereParts: string[] = [];
+
+        if (hasLoaders) {
+          joinParts.push("JOIN mod_loaders ml ON m.id = ml.mod_id");
+          joinParts.push("JOIN loaders l ON ml.loader_id = l.id");
+          const placeholders = opts.loaders!.map(() => "?").join(", ");
+          countWhereParts.push(`l.name IN (${placeholders})`);
+        }
+
+        if (hasVersions) {
+          joinParts.push("JOIN mod_minecraft_versions mv ON m.id = mv.mod_id");
+          joinParts.push("JOIN minecraft_versions v ON mv.minecraft_version_id = v.id");
+          const placeholders = opts.versions!.map(() => "?").join(", ");
+          countWhereParts.push(`v.version IN (${placeholders})`);
+        }
+
+        if (hasCategories) {
+          joinParts.push("JOIN mod_categories mc ON m.id = mc.mod_id");
+          joinParts.push("JOIN categories c ON mc.category_id = c.id");
+          const placeholders = opts.categories!.map(() => "?").join(", ");
+          countWhereParts.push(`c.slug IN (${placeholders})`);
+        }
+
+        if (opts.environments?.length) {
+          for (const env of opts.environments) {
+            if (env === "client") {
+              countWhereParts.push("m.client_side != 'unsupported'");
+            } else if (env === "server") {
+              countWhereParts.push("m.server_side != 'unsupported'");
+            }
+          }
+        }
+
+        const countWhereClause = countWhereParts.length > 0 ? `WHERE ${countWhereParts.join(" AND ")}` : "";
+        countSql = `SELECT COUNT(DISTINCT m.id) as count FROM ${joinParts.join(" ")} ${countWhereClause}`;
+      } else {
+        countSql = `SELECT COUNT(*) as count FROM mods m ${whereClause}`;
+      }
+    }
 
     const total = await getCachedCount(countSql, args);
 
