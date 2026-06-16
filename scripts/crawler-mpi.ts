@@ -66,18 +66,28 @@ export async function crawlModpackIndex(startPageArg?: string) {
   const limit = 100;
   let page = startPage;
   let totalPages = page;
+  let totalSaved = 0;
+  const startTime = Date.now();
+
+  function formatTime(sec: number): string {
+    if (!isFinite(sec) || sec <= 0) return "--:--";
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}m ${s}s`;
+  }
 
   while (true) {
-    console.log(`[ModpackIndex] Fetching page ${page}...`);
     let res;
     try {
       res = await fetchWithRetry(`${MPI_BASE_URL}/mods?page=${page}&limit=${limit}`);
     } catch (e: any) {
+      process.stdout.write("\n");
       console.error(`[ModpackIndex Error] Failed to fetch page ${page}: ${e.message}. Saving progress.`);
       break;
     }
 
     if (!res || !res.data || res.data.length === 0) {
+      process.stdout.write("\n");
       console.log("[ModpackIndex] No more data or empty response. Crawl complete!");
       break;
     }
@@ -115,7 +125,7 @@ export async function crawlModpackIndex(startPageArg?: string) {
       }
 
       // If not mapped/updated to an existing Modrinth project, and has CurseForge ID, treat as CF-only or new
-      if (!mappedToModrinth && curseId) {
+      if (!mappedToNonModrinth(mappedToModrinth) && curseId) {
         const curseIdStr = String(curseId);
         
         // Insert/replace mod using CurseForge ID as mod ID
@@ -186,14 +196,37 @@ export async function crawlModpackIndex(startPageArg?: string) {
       }
     }
 
+    totalSaved += res.data.length;
+
     // Save progress
     await db.execute({
       sql: "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
       args: ["last_fetched_page_mpi", String(page)]
     });
-    console.log(`[ModpackIndex] Page ${page}/${totalPages} complete. Saved ${res.data.length} mods.`);
+
+    // Draw progress bar
+    const elapsed = (Date.now() - startTime) / 1000;
+    const speed = (page - startPage + 1) / (elapsed || 0.1);
+    const remainingPages = totalPages - page;
+    const eta = speed > 0 ? remainingPages / speed : 0;
+    const percentage = ((page - startPage + 1) / (totalPages - startPage + 1 || 1)) * 100;
+
+    const barWidth = 20;
+    const filledWidth = Math.round((percentage / 100) * barWidth);
+    const emptyWidth = Math.max(0, barWidth - filledWidth);
+    const barStr = "█".repeat(filledWidth) + "░".repeat(emptyWidth);
+
+    const progressLine =
+      `\r[MPI Crawl ${barStr}] ${percentage.toFixed(1)}% | ` +
+      `Page: ${page}/${totalPages} | ` +
+      `Total Saved: ${totalSaved} | ` +
+      `Speed: ${speed.toFixed(2)} p/s | ` +
+      `ETA: ${formatTime(eta)}`;
+
+    process.stdout.write("\r\x1b[K" + progressLine);
 
     if (page >= totalPages) {
+      process.stdout.write("\n");
       console.log("[ModpackIndex] Reached final page!");
       break;
     }
@@ -201,4 +234,8 @@ export async function crawlModpackIndex(startPageArg?: string) {
     page++;
     await sleep(1000); // Respect MPI 3,600 requests/hour limit
   }
+}
+
+function mappedToNonModrinth(mapped: boolean): boolean {
+  return mapped;
 }

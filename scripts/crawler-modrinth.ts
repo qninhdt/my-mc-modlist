@@ -155,10 +155,54 @@ export async function crawlModrinth(forceAll = false) {
 
   const batchSize = 100;
   const totalBatches = Math.ceil(allProjectIds.length / batchSize);
+  const totalMods = allProjectIds.length;
+  let processedCount = 0;
+  const startTime = Date.now();
+
+  function formatTime(sec: number): string {
+    if (!isFinite(sec) || sec <= 0) return "--:--";
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}m ${s}s`;
+  }
+
+  function drawProgressBar() {
+    const elapsed = (Date.now() - startTime) / 1000;
+    const speed = processedCount / (elapsed || 0.1);
+    const remaining = totalMods - processedCount;
+    const eta = speed > 0 ? remaining / speed : 0;
+    const percentage = (processedCount / totalMods) * 100;
+
+    const barWidth = 20;
+    const filledWidth = Math.round((percentage / 100) * barWidth);
+    const emptyWidth = Math.max(0, barWidth - filledWidth);
+    const barStr = "█".repeat(filledWidth) + "░".repeat(emptyWidth);
+
+    const progressLine =
+      `\r[MR Crawl ${barStr}] ${percentage.toFixed(1)}% | ` +
+      `Mods: ${processedCount}/${totalMods} | ` +
+      `Speed: ${speed.toFixed(1)} m/s | ` +
+      `ETA: ${formatTime(eta)}`;
+
+    process.stdout.write("\r\x1b[K" + progressLine);
+  }
+
+  function logInfo(msg: string) {
+    process.stdout.write("\r\x1b[K"); // Clear line
+    console.log(msg);
+    drawProgressBar();
+  }
+
+  function logWarn(msg: string) {
+    process.stdout.write("\r\x1b[K"); // Clear line
+    console.warn(msg);
+    drawProgressBar();
+  }
+
+  drawProgressBar();
 
   for (let i = 0; i < totalBatches; i++) {
     const batchIds = allProjectIds.slice(i * batchSize, (i + 1) * batchSize);
-    console.log(`[Modrinth] Processing batch ${i + 1}/${totalBatches} (${batchIds.length} mods)...`);
 
     try {
       const idsParam = JSON.stringify(batchIds);
@@ -166,7 +210,9 @@ export async function crawlModrinth(forceAll = false) {
       const projects = await fetchWithRetry(projectsUrl);
 
       if (!Array.isArray(projects)) {
-        console.warn(`[Modrinth] Batch ${i + 1} did not return projects array. Skipping.`);
+        logWarn(`[Modrinth] Batch ${i + 1} did not return projects array. Skipping.`);
+        processedCount += batchIds.length;
+        drawProgressBar();
         continue;
       }
 
@@ -186,7 +232,7 @@ export async function crawlModrinth(forceAll = false) {
             }
           }
         } catch (e: any) {
-          console.error("[Modrinth] Failed to batch fetch teams:", e.message);
+          logWarn(`[Modrinth] Failed to batch fetch teams: ${e.message}`);
         }
       }
 
@@ -207,7 +253,7 @@ export async function crawlModrinth(forceAll = false) {
 
       const versionsMap = new Map<string, any[]>(); // project_id -> versions[]
       if (allVersionIdsToFetch.length > 0) {
-        console.log(`[Modrinth] Batch fetching ${allVersionIdsToFetch.length} versions for ${projectsNeedingVersions.size} mods...`);
+        logInfo(`[Modrinth] Batch fetching ${allVersionIdsToFetch.length} versions for ${projectsNeedingVersions.size} mods...`);
         const vBatchSize = 100;
         const totalVBatches = Math.ceil(allVersionIdsToFetch.length / vBatchSize);
         
@@ -229,7 +275,7 @@ export async function crawlModrinth(forceAll = false) {
               }
             }
           } catch (vErr: any) {
-            console.error(`[Modrinth] Failed to fetch version batch ${j + 1}/${totalVBatches}:`, vErr.message);
+            logWarn(`[Modrinth] Failed to fetch version batch ${j + 1}/${totalVBatches}: ${vErr.message}`);
           }
         }
       }
@@ -395,9 +441,12 @@ export async function crawlModrinth(forceAll = false) {
         try {
           await db.batch(statements, "write");
         } catch (e: any) {
-          console.error(`[Modrinth DB Error] Failed to write mod ${p.slug}:`, e.message);
+          logWarn(`[Modrinth DB Error] Failed to write mod ${p.slug}: ${e.message}`);
         }
       }
+
+      processedCount += batchIds.length;
+      drawProgressBar();
 
       projects.length = 0;
       teamMap.clear();
@@ -409,9 +458,12 @@ export async function crawlModrinth(forceAll = false) {
 
       await sleep(350);
     } catch (batchErr: any) {
-      console.error(`[Modrinth Batch Error] Batch ${i + 1} failed:`, batchErr.message);
+      logWarn(`[Modrinth Batch Error] Batch ${i + 1} failed: ${batchErr.message}`);
+      processedCount += batchIds.length;
+      drawProgressBar();
     }
   }
 
+  process.stdout.write("\n");
   console.log("Modrinth detailed crawl and relational mapping complete!");
 }
