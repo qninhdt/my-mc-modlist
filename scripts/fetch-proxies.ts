@@ -5,6 +5,29 @@ import net from "net";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { SocksProxyAgent } from "socks-proxy-agent";
 
+// Catch and ignore transient socket/network errors from testing bad proxies to prevent process crash
+process.on("uncaughtException", (err: any) => {
+  const isNetworkError =
+    err.code === "ECONNRESET" ||
+    err.code === "ETIMEDOUT" ||
+    err.code === "EPIPE" ||
+    err.code === "ECONNREFUSED" ||
+    err.code === "EHOSTUNREACH" ||
+    err.code === "ENETUNREACH" ||
+    err.message?.includes("secure TLS connection") ||
+    err.message?.includes("socket hang up");
+
+  if (isNetworkError) {
+    return;
+  }
+  console.error("Uncaught exception:", err);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", () => {
+  // Silently ignore promise rejections from transient check failures
+});
+
 const PROXY_DIR = path.join(process.cwd(), "proxy");
 const OUTPUT_FILE = path.join(PROXY_DIR, "fetched_proxies.txt");
 

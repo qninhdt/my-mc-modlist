@@ -3,15 +3,13 @@ import dotenv from "dotenv";
 
 dotenv.config({ path: ".env.local" });
 
-const url = process.env.TURSO_DATABASE_URL;
-if (!url) {
-  console.error("Missing TURSO_DATABASE_URL environment variable!");
-  process.exit(1);
-}
+// Use the environment variable if available, otherwise fallback to the local SQLite database file
+const url = process.env.TURSO_DATABASE_URL || "file:data/mods.db";
+const authToken = process.env.TURSO_AUTH_TOKEN;
 
 export const db = createClient({
   url,
-  authToken: process.env.TURSO_AUTH_TOKEN
+  authToken
 });
 
 // Caches for O(1) lookups to minimize DB roundtrips
@@ -44,6 +42,11 @@ export async function loadCaches() {
 }
 
 export async function initDb(forceReset: boolean) {
+  // Configure SQLite for concurrent reads and writes, and handle locks gracefully
+  await db.execute("PRAGMA journal_mode = WAL;");
+  await db.execute("PRAGMA busy_timeout = 30000;");
+  await db.execute("PRAGMA foreign_keys = ON;");
+
   if (forceReset) {
     console.log("Flag --reset passed. Dropping existing tables...");
     await db.execute("DROP TABLE IF EXISTS version_loaders");
@@ -55,6 +58,7 @@ export async function initDb(forceReset: boolean) {
     await db.execute("DROP TABLE IF EXISTS minecraft_versions");
     await db.execute("DROP TABLE IF EXISTS authors");
     await db.execute("DROP TABLE IF EXISTS categories");
+    await db.execute("DROP TABLE IF EXISTS mod_descriptions");
     await db.execute("DROP TABLE IF EXISTS mods");
     await db.execute("DROP TABLE IF EXISTS metadata");
 
@@ -87,8 +91,6 @@ export async function initDb(forceReset: boolean) {
       name TEXT NOT NULL,
       slug TEXT NOT NULL,
       summary TEXT,
-      description TEXT,
-      description_compressed BLOB,
       thumbnail_url TEXT,
       download_count INTEGER DEFAULT 0,
       popularity_rank INTEGER DEFAULT 0,
@@ -107,7 +109,23 @@ export async function initDb(forceReset: boolean) {
       server_side TEXT,
       published TEXT,
       updated TEXT,
-      fetched_at TEXT
+      fetched_at TEXT,
+      categories_json TEXT,
+      loaders_json TEXT,
+      versions_json TEXT,
+      gallery_json TEXT
+    )
+  `);
+
+  try {
+    await db.execute("ALTER TABLE mods ADD COLUMN gallery_json TEXT;");
+  } catch (e) {}
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS mod_descriptions (
+      mod_id TEXT PRIMARY KEY,
+      description_compressed BLOB,
+      FOREIGN KEY (mod_id) REFERENCES mods(id) ON DELETE CASCADE
     )
   `);
 
@@ -174,7 +192,7 @@ export async function initDb(forceReset: boolean) {
       filesize INTEGER,
       uploaded_at TEXT,
       downloads INTEGER DEFAULT 0,
-      changelog TEXT,
+      changelog_compressed BLOB,
       FOREIGN KEY (mod_id) REFERENCES mods(id) ON DELETE CASCADE
     )
   `);
@@ -292,4 +310,34 @@ export async function getOrCreateMinecraftVersion(version: string): Promise<numb
     return id;
   }
   throw new Error(`Failed to get or create Minecraft version: ${version}`);
+}
+
+export function isMinecraftVersionAllowed(version: string): boolean {
+  const match = version.trim().match(/^1\.(\d+)(?:\.(\d+))?$/);
+  if (!match) return false;
+  const x = parseInt(match[1], 10);
+  const y = match[2] ? parseInt(match[2], 10) : 0;
+  if (x < 16) return false;
+  if (x === 16 && y < 5) return false;
+  return true;
+}
+
+let dbWritePromise: Promise<any> = Promise.resolve();
+let dbWriteQueueLength = 0;
+
+export async function runSerializedDb<T>(fn: () => Promise<T>): Promise<T> {
+  dbWriteQueueLength++;
+  const next = dbWritePromise.then(async () => {
+    try {
+      return await fn();
+    } finally {
+      dbWriteQueueLength--;
+    }
+  });
+  dbWritePromise = next.catch(() => {});
+  return next;
+}
+
+export function getDbQueueLength(): number {
+  return dbWriteQueueLength;
 }

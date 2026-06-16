@@ -5,12 +5,15 @@ import {
   getOrCreateAuthor,
   getOrCreateLoader,
   getOrCreateMinecraftVersion,
-  isMinecraftVersionAllowed
+  isMinecraftVersionAllowed,
+  runSerializedDb,
+  getDbQueueLength
 } from "./crawler-db";
 import { fetchWithProxy, getProxyCount, getActiveProxies, loadProxies } from "./crawler-proxy";
 
 const USER_AGENT = "qninhdt/my-mc-modlist/1.0 (contact: qndt123@gmail.com)";
-const CONCURRENCY = parseInt(process.env.CONCURRENCY || "2", 10);
+const CONNS_PER_PROXY = parseInt(process.env.CONNS_PER_PROXY || "10", 10);
+const MAX_CONCURRENT_WORKERS = 1000;
 
 function parseGameVersionsAndLoaders(versions: string[]) {
   const gameVersions: string[] = [];
@@ -34,161 +37,184 @@ async function fetchModDetails(curseId: number, proxyUrl?: string | null, retrie
 }
 
 export async function crawlSingleCurseForge(curseId: number, proxyUrl?: string | null): Promise<void> {
-  const data = await fetchModDetails(curseId, proxyUrl);
-
-  // Retrieve the canonical ID from the database (could be a Modrinth ID if mapped)
-  const existRes = await db.execute({
-    sql: "SELECT id FROM mods WHERE curse_id = ?",
-    args: [curseId]
-  });
-  const canonicalId = (existRes.rows[0]?.id as string) || String(curseId);
-
-  const name = data.name || data.title || null;
-  const slug = data.urls?.project?.split("/").pop() || null;
-  const summary = data.summary || null;
-  const descriptionRaw = data.description || null;
-  const descriptionCompressed = descriptionRaw
-    ? zlib.deflateSync(Buffer.from(descriptionRaw, "utf-8"))
-    : null;
-
-  const projectUrl = data.urls?.project || null;
-  const issuesUrl = data.urls?.issues || null;
-  const sourceUrl = data.urls?.source || null;
-  const wikiUrl = data.urls?.wiki || null;
-  const logoUrl = data.thumbnail || null;
-  const downloads = data.downloads?.total || 0;
-  const donateUrl = data.donate || null;
-
-  const statements: any[] = [];
-
-  // Update mods record with full CurseForge details
-  statements.push({
-    sql: `
-      UPDATE mods SET
-        name = COALESCE(?, name),
-        slug = COALESCE(?, slug),
-        summary = COALESCE(?, summary),
-        description = ?,
-        description_compressed = ?,
-        thumbnail_url = COALESCE(?, thumbnail_url),
-        download_count = COALESCE(?, download_count),
-        page_url = COALESCE(?, page_url),
-        curseforge_url = COALESCE(?, curseforge_url),
-        issues_url = COALESCE(?, issues_url),
-        source_url = COALESCE(?, source_url),
-        wiki_url = COALESCE(?, wiki_url),
-        donate_url = COALESCE(?, donate_url),
-        fetched_at = ?
-      WHERE id = ?
-    `,
-    args: [
-      name, slug, summary, descriptionRaw, descriptionCompressed, logoUrl,
-      downloads, projectUrl, projectUrl, issuesUrl, sourceUrl, wikiUrl, donateUrl,
-      new Date().toISOString(), canonicalId
-    ]
-  });
-
-  // Relate categories
-  if (Array.isArray(data.categories)) {
-    statements.push({
-      sql: "DELETE FROM mod_categories WHERE mod_id = ?",
-      args: [canonicalId]
-    });
-    for (const cat of data.categories) {
-      const catName = typeof cat === "string" ? cat : cat.name || cat;
-      const catSlug = typeof cat === "string" ? cat.toLowerCase().replace(/\s+/g, "-") : cat.slug || catName.toLowerCase().replace(/\s+/g, "-");
-      const catId = await getOrCreateCategory(catName, catSlug);
-      statements.push({
-        sql: "INSERT OR IGNORE INTO mod_categories (mod_id, category_id) VALUES (?, ?)",
-        args: [canonicalId, catId]
+  let data;
+  try {
+    data = await fetchModDetails(curseId, proxyUrl);
+  } catch (err: any) {
+    if (err.message === "HTTP_404") {
+      await runSerializedDb(async () => {
+        const descriptionCompressed = zlib.deflateSync(Buffer.from("404_NOT_FOUND", "utf-8"));
+        await db.execute({
+          sql: "UPDATE mods SET name = COALESCE(name, ?), slug = COALESCE(slug, ?), description = '404_NOT_FOUND', description_compressed = ?, fetched_at = ? WHERE id = ? OR curse_id = ?",
+          args: [
+            `Mod ${curseId}`,
+            `mod-${curseId}`,
+            descriptionCompressed,
+            new Date().toISOString(),
+            String(curseId),
+            curseId
+          ]
+        });
       });
     }
+    throw err;
   }
 
-  // Relate authors/members
-  if (Array.isArray(data.members)) {
-    statements.push({
-      sql: "DELETE FROM mod_authors WHERE mod_id = ?",
-      args: [canonicalId]
+  await runSerializedDb(async () => {
+    // Retrieve the canonical ID from the database (could be a Modrinth ID if mapped)
+    const existRes = await db.execute({
+      sql: "SELECT id FROM mods WHERE curse_id = ?",
+      args: [curseId]
     });
-    for (const member of data.members) {
-      const authorName = member.name || member.username;
-      if (authorName) {
-        const authorId = await getOrCreateAuthor(
-          authorName,
-          member.username || undefined,
-          member.url || undefined
-        );
-        statements.push({
-          sql: "INSERT OR IGNORE INTO mod_authors (mod_id, author_id, role) VALUES (?, ?, ?)",
-          args: [canonicalId, authorId, member.title || null]
-        });
-      }
-    }
-  }
+    const canonicalId = (existRes.rows[0]?.id as string) || String(curseId);
 
-  // Relate files/versions
-  if (Array.isArray(data.files)) {
-    const files = data.files;
+    const name = data.name || data.title || null;
+    const slug = data.urls?.project?.split("/").pop() || null;
+    const summary = data.summary || null;
+    const descriptionRaw = data.description || null;
+    const descriptionCompressed = descriptionRaw
+      ? zlib.deflateSync(Buffer.from(descriptionRaw, "utf-8"))
+      : null;
 
-    // Clear old versions
-    const versionIds = files.map((f: any) => String(f.id));
-    for (const vId of versionIds) {
-      statements.push({ sql: "DELETE FROM version_loaders WHERE version_id = ?", args: [vId] });
-      statements.push({ sql: "DELETE FROM version_minecraft_versions WHERE version_id = ?", args: [vId] });
-      statements.push({ sql: "DELETE FROM mod_versions WHERE id = ?", args: [vId] });
-    }
+    const projectUrl = data.urls?.project || null;
+    const issuesUrl = data.urls?.issues || null;
+    const sourceUrl = data.urls?.source || null;
+    const wikiUrl = data.urls?.wiki || null;
+    const logoUrl = data.thumbnail || null;
+    const downloads = data.downloads?.total || 0;
+    const donateUrl = data.donate || null;
 
-    for (const f of files) {
-      const { gameVersions, loaders } = parseGameVersionsAndLoaders(f.versions);
-      const allowedGameVersions = gameVersions.filter(isMinecraftVersionAllowed);
+    const statements: any[] = [];
 
-      if (allowedGameVersions.length === 0 && gameVersions.length > 0) {
-        continue;
-      }
+    // Update mods record with full CurseForge details
+    statements.push({
+      sql: `
+        UPDATE mods SET
+          name = COALESCE(?, name),
+          slug = COALESCE(?, slug),
+          summary = COALESCE(?, summary),
+          description = ?,
+          description_compressed = ?,
+          thumbnail_url = COALESCE(?, thumbnail_url),
+          download_count = COALESCE(?, download_count),
+          page_url = COALESCE(?, page_url),
+          curseforge_url = COALESCE(?, curseforge_url),
+          issues_url = COALESCE(?, issues_url),
+          source_url = COALESCE(?, source_url),
+          wiki_url = COALESCE(?, wiki_url),
+          donate_url = COALESCE(?, donate_url),
+          fetched_at = ?
+        WHERE id = ?
+      `,
+      args: [
+        name, slug, summary, descriptionRaw, descriptionCompressed, logoUrl,
+        downloads, projectUrl, projectUrl, issuesUrl, sourceUrl, wikiUrl, donateUrl,
+        new Date().toISOString(), canonicalId
+      ]
+    });
 
-      const versionIdStr = String(f.id);
-      const uploadedAtStr = f.uploaded_at ? new Date(f.uploaded_at).toISOString() : null;
-
+    // Relate categories
+    if (Array.isArray(data.categories)) {
       statements.push({
-        sql: `
-          INSERT OR REPLACE INTO mod_versions (
-            id, mod_id, name, version_number, type, filesize, uploaded_at, downloads, changelog
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-        args: [
-          versionIdStr,
-          canonicalId,
-          f.name || `File ${f.id}`,
-          f.display || f.name || null,
-          f.type || "release",
-          f.filesize || 0,
-          uploadedAtStr,
-          f.downloads || 0,
-          null // changelog not available on cfwidget root response usually
-        ]
+        sql: "DELETE FROM mod_categories WHERE mod_id = ?",
+        args: [canonicalId]
       });
-
-      for (const loader of loaders) {
-        const loaderId = await getOrCreateLoader(loader);
+      for (const cat of data.categories) {
+        const catName = typeof cat === "string" ? cat : cat.name || cat;
+        const catSlug = typeof cat === "string" ? cat.toLowerCase().replace(/\s+/g, "-") : cat.slug || catName.toLowerCase().replace(/\s+/g, "-");
+        const catId = await getOrCreateCategory(catName, catSlug);
         statements.push({
-          sql: "INSERT OR IGNORE INTO version_loaders (version_id, loader_id) VALUES (?, ?)",
-          args: [versionIdStr, loaderId]
-        });
-      }
-
-      for (const gv of allowedGameVersions) {
-        const gvId = await getOrCreateMinecraftVersion(gv);
-        statements.push({
-          sql: "INSERT OR IGNORE INTO version_minecraft_versions (version_id, minecraft_version_id) VALUES (?, ?)",
-          args: [versionIdStr, gvId]
+          sql: "INSERT OR IGNORE INTO mod_categories (mod_id, category_id) VALUES (?, ?)",
+          args: [canonicalId, catId]
         });
       }
     }
-  }
 
-  // Execute batch transaction
-  await db.batch(statements, "write");
+    // Relate authors/members
+    if (Array.isArray(data.members)) {
+      statements.push({
+        sql: "DELETE FROM mod_authors WHERE mod_id = ?",
+        args: [canonicalId]
+      });
+      for (const member of data.members) {
+        const authorName = member.name || member.username;
+        if (authorName) {
+          const authorId = await getOrCreateAuthor(
+            authorName,
+            member.username || undefined,
+            member.url || undefined
+          );
+          statements.push({
+            sql: "INSERT OR IGNORE INTO mod_authors (mod_id, author_id, role) VALUES (?, ?, ?)",
+            args: [canonicalId, authorId, member.title || null]
+          });
+        }
+      }
+    }
+
+    // Relate files/versions
+    if (Array.isArray(data.files)) {
+      const files = data.files;
+
+      // Clear old versions
+      const versionIds = files.map((f: any) => String(f.id));
+      for (const vId of versionIds) {
+        statements.push({ sql: "DELETE FROM version_loaders WHERE version_id = ?", args: [vId] });
+        statements.push({ sql: "DELETE FROM version_minecraft_versions WHERE version_id = ?", args: [vId] });
+        statements.push({ sql: "DELETE FROM mod_versions WHERE id = ?", args: [vId] });
+      }
+
+      for (const f of files) {
+        const { gameVersions, loaders } = parseGameVersionsAndLoaders(f.versions);
+        const allowedGameVersions = gameVersions.filter(isMinecraftVersionAllowed);
+
+        if (allowedGameVersions.length === 0 && gameVersions.length > 0) {
+          continue;
+        }
+
+        const versionIdStr = String(f.id);
+        const uploadedAtStr = f.uploaded_at ? new Date(f.uploaded_at).toISOString() : null;
+
+        statements.push({
+          sql: `
+            INSERT OR REPLACE INTO mod_versions (
+              id, mod_id, name, version_number, type, filesize, uploaded_at, downloads, changelog
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `,
+          args: [
+            versionIdStr,
+            canonicalId,
+            f.name || `File ${f.id}`,
+            f.display || f.name || null,
+            f.type || "release",
+            f.filesize || 0,
+            uploadedAtStr,
+            f.downloads || 0,
+            null // changelog not available on cfwidget root response usually
+          ]
+        });
+
+        for (const loader of loaders) {
+          const loaderId = await getOrCreateLoader(loader);
+          statements.push({
+            sql: "INSERT OR IGNORE INTO version_loaders (version_id, loader_id) VALUES (?, ?)",
+            args: [versionIdStr, loaderId]
+          });
+        }
+
+        for (const gv of allowedGameVersions) {
+          const gvId = await getOrCreateMinecraftVersion(gv);
+          statements.push({
+            sql: "INSERT OR IGNORE INTO version_minecraft_versions (version_id, minecraft_version_id) VALUES (?, ?)",
+            args: [versionIdStr, gvId]
+          });
+        }
+      }
+    }
+
+    // Execute batch transaction
+    await db.batch(statements, "write");
+  });
 }
 
 export async function crawlCurseForge(forceAll = false) {
@@ -223,68 +249,58 @@ export async function crawlCurseForge(forceAll = false) {
     const emptyWidth = barWidth - filledWidth;
     const barStr = "█".repeat(filledWidth) + "░".repeat(emptyWidth);
 
+    const formatTime = (sec: number) => {
+      if (!isFinite(sec) || sec <= 0) return "--:--";
+      const m = Math.floor(sec / 60);
+      const s = Math.floor(sec % 60);
+      return `${m}m ${s}s`;
+    };
+
     const progressLine =
-      `\r[CF Crawl ${barStr}] ${percentage.toFixed(1)}% | ` +
-      `${successCount}/${totalPending} | ` +
+      `\r\x1b[K[CF Crawl ${barStr}] ${percentage.toFixed(1)}% | ` +
+      `Active: ${successCount}/${totalPending} | ` +
+      `Pending: ${pendingIds.length} | ` +
+      `DBQ: ${getDbQueueLength()} | ` +
       `Speed: ${speed.toFixed(1)}/s | ` +
-      `OK: ${successCount} | ` +
-      `Err: ${failCount} | ` +
+      `ETA: ${formatTime(eta)} | ` +
       `Proxies: ${getActiveProxies().length}`;
 
-    process.stdout.write("\r\x1b[K" + progressLine);
+    process.stdout.write(progressLine);
   }
 
   drawProgressBar();
 
-  async function worker(proxyUrl: string | null) {
+  async function worker() {
     while (pendingIds.length > 0) {
-      if (proxyUrl && !getActiveProxies().includes(proxyUrl)) {
-        break; // Proxy was pruned, exit worker
-      }
-
       const curseId = pendingIds.shift();
       if (curseId === undefined) break;
 
       try {
-        await crawlSingleCurseForge(curseId, proxyUrl);
+        await crawlSingleCurseForge(curseId);
         successCount++;
       } catch (err: any) {
         failCount++;
-        pendingIds.push(curseId); // Defer indefinitely
+        if (err.message === "HTTP_404") {
+          successCount++;
+        } else {
+          // Push back to queue to retry later
+          pendingIds.push(curseId);
+          // Wait briefly to avoid tight loop on continuous failures
+          await new Promise((r) => setTimeout(r, 1000));
+        }
       } finally {
         drawProgressBar();
       }
-
-      const delay = proxyUrl ? 0 : 1000;
-      await new Promise((r) => setTimeout(r, delay));
     }
   }
 
   // Load proxies
   loadProxies();
-  const activeProxies = getActiveProxies();
-  const workers: Promise<void>[] = [];
+  const maxWorkers = getActiveProxies().length > 0 ? getActiveProxies().length * CONNS_PER_PROXY : 4;
+  const workerCount = Math.min(MAX_CONCURRENT_WORKERS, Math.max(4, maxWorkers));
 
-  if (activeProxies.length > 0) {
-    // Spawn 2 workers per proxy concurrently
-    for (const proxy of activeProxies) {
-      workers.push(worker(proxy));
-      workers.push(worker(proxy));
-    }
-  } else {
-    // Fallback to direct connections (e.g. 4 workers)
-    for (let i = 0; i < 4; i++) {
-      workers.push(worker(null));
-    }
-  }
-
-  await Promise.all(workers);
-
-  // If we still have pending IDs and all proxies died, run direct fallback
-  if (pendingIds.length > 0 && getActiveProxies().length === 0) {
-    const fallbackWorkers = Array.from({ length: 4 }, () => worker(null));
-    await Promise.all(fallbackWorkers);
-  }
+  // Spawn parallel workers
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
   process.stdout.write("\n");
 }

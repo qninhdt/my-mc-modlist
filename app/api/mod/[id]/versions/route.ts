@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { getProjectVersions } from "@/lib/api/modrinth";
 import { getMod } from "@/lib/api/modpackindex";
-import { isSqliteDbAvailable, localGetCurseforgeModFiles } from "@/lib/api/sqlite-helper";
+import { isSqliteDbAvailable, localGetCurseforgeModFiles, localGetModBySlug } from "@/lib/api/sqlite-helper";
 
 export const runtime = "nodejs";
 
@@ -22,9 +22,43 @@ export async function GET(
   }
 
   const decodedId = decodeURIComponent(id);
-  if (decodedId.startsWith("cf:")) {
+  const isCf = decodedId.startsWith("cf:") || /^\d+$/.test(decodedId);
+  if (isCf) {
     try {
-      const mpiId = parseInt(decodedId.slice(3), 10);
+      const cfSlugOrId = decodedId.startsWith("cf:")
+        ? decodedId.slice(3)
+        : decodedId;
+      
+      let mpiId = parseInt(cfSlugOrId, 10);
+
+      if (isNaN(mpiId)) {
+        // Look up by slug in SQLite
+        if (isSqliteDbAvailable()) {
+          const localMod = await localGetModBySlug(cfSlugOrId);
+          if (localMod) {
+            mpiId = localMod.mpi_id || localMod.curse_id || parseInt(localMod.id, 10);
+          }
+        }
+
+        // If not found in SQLite, fetch from cfwidget using the slug
+        if (isNaN(mpiId)) {
+          try {
+            const res = await fetch(`https://api.cfwidget.com/${cfSlugOrId}`, {
+              headers: { "User-Agent": USER_AGENT },
+              next: { revalidate: 3600 },
+            });
+            if (res.ok) {
+              const cfData = await res.json();
+              if (cfData && cfData.id) {
+                mpiId = cfData.id;
+              }
+            }
+          } catch (err) {
+            console.warn("Failed to fetch CFWidget data by slug in versions:", err);
+          }
+        }
+      }
+
       if (isNaN(mpiId)) {
         return NextResponse.json({ versions: [] });
       }

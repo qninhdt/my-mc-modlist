@@ -242,7 +242,7 @@ export function normalizeCurseforgeOnly(mod: ModpackIndexMod): ModView {
     serverSide: unknown,
     downloads: mod.download_count ?? 0,
     sources: {
-      ...(mod.links?.curseforge ? { curseforge: { url: mod.links.curseforge } } : {}),
+      curseforge: { url: mod.links?.curseforge || `https://www.curseforge.com/minecraft/mc-mods/${mod.slug}` },
     },
     modrinthProjects: [],
     curseforgeManual: true,

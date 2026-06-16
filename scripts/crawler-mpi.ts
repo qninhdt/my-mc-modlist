@@ -3,6 +3,8 @@ import {
   getOrCreateCategory,
   getOrCreateAuthor,
   getOrCreateMinecraftVersion,
+  runSerializedDb,
+  getDbQueueLength,
 } from "./crawler-db";
 import { fetchWithProxy, getProxyCount, getActiveProxies, loadProxies } from "./crawler-proxy";
 import { crawlSingleCurseForge } from "./crawler-cf";
@@ -14,6 +16,8 @@ const USER_AGENT =
   "qninhdt/my-mc-modlist/1.0 (contact: qndt123@gmail.com)";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const CONNS_PER_PROXY = parseInt(process.env.CONNS_PER_PROXY || "10", 10);
+const MAX_CONCURRENT_WORKERS = 1000;
 
 async function fetchWithRetry(url: string, retries = 10): Promise<any> {
   const headers = {
@@ -31,15 +35,8 @@ async function getMetadataVal(key: string): Promise<string | undefined> {
   return res.rows[0]?.value as string | undefined;
 }
 
-let dbWritePromise: Promise<void> = Promise.resolve();
-
-async function runSerializedDb(fn: () => Promise<void>) {
-  const next = dbWritePromise.then(fn).catch(() => {});
-  dbWritePromise = next;
-  await next;
-}
-
 export async function crawlModpackIndex(startPageArg?: string) {
+  loadProxies();
   const metaVal = await getMetadataVal("last_fetched_page_mpi");
 
   let startPage = 1;
@@ -95,6 +92,10 @@ export async function crawlModpackIndex(startPageArg?: string) {
   let cfTotalToCrawl = 0;
   const cfStartTime = Date.now();
 
+  let isMpiDone = false;
+  const cfQueue: number[] = [];
+  const cfQueuedIds = new Set<number>();
+
   function drawProgressBar() {
     const elapsed = (Date.now() - startTime) / 1000;
     const speed = pagesProcessed / (elapsed || 0.1);
@@ -135,85 +136,25 @@ export async function crawlModpackIndex(startPageArg?: string) {
     const cfRemaining = cfTotalToCrawl - cfSuccessCount;
     const cfEta = cfSpeed > 0 ? cfRemaining / cfSpeed : 0;
 
-    const cfMaxWorkers = getActiveProxies().length * 2 || 4;
     const cfLine =
       `\n\x1b[K[CF Crawl  ${cfBarStr}] ${cfPercentage.toFixed(1)}% | ` +
-      `Active: ${cfWorkersRunning}/${cfMaxWorkers} | ` +
+      `Active: ${cfSuccessCount}/${cfTotalToCrawl} | ` +
       `Pending: ${cfQueue.length} | ` +
-      `OK: ${cfSuccessCount} | ` +
-      `Err: ${cfFailCount} | ` +
       `Proxies: ${getActiveProxies().length} | ` +
+      `DBQ: ${getDbQueueLength()} | ` +
       `Speed: ${cfSpeed.toFixed(1)}/s | ` +
       `ETA: ${formatTime(cfEta)}`;
 
     process.stdout.write(progressLine + cfLine + "\x1b[1A");
   }
 
-  const cfQueue: number[] = [];
-  let cfWorkersRunning = 0;
-  const activeWorkers = new Map<string, number>();
-  let directWorkersRunning = 0;
-
-  async function spawnWorker(proxyUrl: string | null) {
-    if (proxyUrl) {
-      activeWorkers.set(proxyUrl, (activeWorkers.get(proxyUrl) || 0) + 1);
-    } else {
-      directWorkersRunning++;
-    }
-    cfWorkersRunning++;
-
-    try {
-      while (cfQueue.length > 0) {
-        if (proxyUrl && !getActiveProxies().includes(proxyUrl)) {
-          break; // Proxy was pruned, exit worker
-        }
-
-        const curseId = cfQueue.shift();
-        if (curseId === undefined) break;
-
-        try {
-          await crawlSingleCurseForge(curseId, proxyUrl);
-          cfSuccessCount++;
-        } catch (err: any) {
-          cfFailCount++;
-          cfQueue.push(curseId); // Defer indefinitely
-        }
-        drawProgressBar();
-        await sleep(0);
-      }
-    } finally {
-      if (proxyUrl) {
-        activeWorkers.set(proxyUrl, Math.max(0, (activeWorkers.get(proxyUrl) || 1) - 1));
-      } else {
-        directWorkersRunning = Math.max(0, directWorkersRunning - 1);
-      }
-      cfWorkersRunning--;
-      drawProgressBar();
-      triggerCfWorkers();
-    }
-  }
-
-  function triggerCfWorkers() {
-    if (cfQueue.length === 0) return;
-
-    loadProxies();
-    const activeProxies = getActiveProxies();
-
-    if (activeProxies.length > 0) {
-      for (const proxy of activeProxies) {
-        const currentCount = activeWorkers.get(proxy) || 0;
-        const toSpawn = 2 - currentCount;
-        for (let i = 0; i < toSpawn; i++) {
-          if (cfQueue.length === 0) break;
-          spawnWorker(proxy);
-        }
-      }
-    } else {
-      const toSpawn = 4 - directWorkersRunning;
-      for (let i = 0; i < toSpawn; i++) {
-        if (cfQueue.length === 0) break;
-        spawnWorker(null);
-      }
+  // Pre-load already crawled CurseForge mods to prevent duplicate/virtual counts
+  const crawledCfRes = await db.execute(
+    "SELECT curse_id FROM mods WHERE curse_id IS NOT NULL AND description_compressed IS NOT NULL",
+  );
+  for (const row of crawledCfRes.rows) {
+    if (row.curse_id) {
+      cfQueuedIds.add(Number(row.curse_id));
     }
   }
 
@@ -224,14 +165,15 @@ export async function crawlModpackIndex(startPageArg?: string) {
   let preloadedCount = 0;
   for (const row of pendingCfRes.rows) {
     if (row.curse_id) {
-      cfQueue.push(Number(row.curse_id));
-      preloadedCount++;
+      const cid = Number(row.curse_id);
+      if (!cfQueuedIds.has(cid)) {
+        cfQueue.push(cid);
+        cfQueuedIds.add(cid);
+        preloadedCount++;
+      }
     }
   }
   cfTotalToCrawl += preloadedCount;
-
-  // Start background workers immediately to begin draining the queue
-  triggerCfWorkers();
 
   drawProgressBar();
 
@@ -410,8 +352,9 @@ export async function crawlModpackIndex(startPageArg?: string) {
           }
 
           // Queue for CurseForge widget crawling
-          if (curseId !== null) {
+          if (curseId !== null && !cfQueuedIds.has(curseId)) {
             cfQueue.push(curseId);
+            cfQueuedIds.add(curseId);
             cfTotalToCrawl++;
           }
         }
@@ -438,11 +381,9 @@ export async function crawlModpackIndex(startPageArg?: string) {
     totalSaved += data.length;
     pagesProcessed++;
     drawProgressBar();
-
-    triggerCfWorkers();
   }
 
-  async function worker() {
+  async function mpiWorker() {
     while (pageQueue.length > 0) {
       const page = pageQueue.shift();
       if (page === undefined) break;
@@ -463,14 +404,48 @@ export async function crawlModpackIndex(startPageArg?: string) {
     }
   }
 
-  // Spawn 2 concurrent page-crawling workers!
-  const workerCount = Math.min(2, totalPagesToProcess);
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  async function cfWorker() {
+    while (true) {
+      if (cfQueue.length > 0) {
+        const curseId = cfQueue.shift();
+        if (curseId === undefined) continue;
+
+        try {
+          await crawlSingleCurseForge(curseId);
+          cfSuccessCount++;
+        } catch (err: any) {
+          cfFailCount++;
+          if (err.message === "HTTP_404") {
+            cfSuccessCount++;
+          } else {
+            cfQueue.push(curseId); // Defer
+            await sleep(1000); // Backoff
+          }
+        } finally {
+          drawProgressBar();
+        }
+      } else if (isMpiDone) {
+        break; // MPI is done producing, and queue is empty, so exit
+      } else {
+        await sleep(200); // Wait for MPI to produce more CF ids
+      }
+    }
+  }
+
+  // Spawn CF background workers
+  const maxWorkers = getActiveProxies().length > 0 ? getActiveProxies().length * CONNS_PER_PROXY : 4;
+  const cfWorkerCount = Math.min(MAX_CONCURRENT_WORKERS, Math.max(4, maxWorkers));
+  const cfWorkersPromise = Promise.all(Array.from({ length: cfWorkerCount }, () => cfWorker()));
+
+  // Spawn 2 concurrent MPI page-crawling workers!
+  const mpiWorkerCount = Math.min(2, totalPagesToProcess);
+  await Promise.all(Array.from({ length: mpiWorkerCount }, () => mpiWorker()));
+
+  // MPI is done
+  isMpiDone = true;
 
   // Wait for background CurseForge workers to complete
-  while (cfWorkersRunning > 0 || cfQueue.length > 0) {
-    await sleep(200);
-  }
+  await cfWorkersPromise;
 
   // Move cursor down past the 2-line progress bar
   if (!(global as any).isParallelCrawl) {

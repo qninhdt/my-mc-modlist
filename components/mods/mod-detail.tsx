@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Download, Calendar, Users, ExternalLink, Globe, Info, MessageCircle, FileText, CheckCircle2 } from "lucide-react";
-import type { ModView, ModrinthVersion } from "@/lib/api/types";
+import type { ModView } from "@/lib/api/types";
 import { SideBadges } from "./side-badge";
 import { SourceBadges } from "./source-badge";
 import { useModVersions } from "@/lib/api/search-queries";

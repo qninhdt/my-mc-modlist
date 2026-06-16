@@ -119,8 +119,50 @@ function SearchPageContent() {
     limit,
   ]);
 
+  // Helper to check if two string arrays are equal
+  const isArrayEqual = (a: string[], b: string[]) =>
+    a.length === b.length && a.every((v, i) => v === b[i]);
+
+  // Synchronize URL search params to component state on mount / change
+  useEffect(() => {
+    const q = searchParams.get("q") ?? "";
+    const p = Math.max(0, Number(searchParams.get("page") ?? "1") - 1);
+    const s = (searchParams.get("sort") ?? "relevance") as SortIndex;
+    const l = Math.min(100, Math.max(10, Number(searchParams.get("limit") ?? "20")));
+    const loadersList = csvToArray(searchParams.get("loaders"));
+    const versionsList = csvToArray(searchParams.get("versions"));
+    const categoriesList = csvToArray(searchParams.get("categories"));
+    const environmentsList = csvToArray(searchParams.get("environments"));
+    const sourcesList = csvToArray(searchParams.get("sources"));
+
+    setQuery((prev) => (prev === q ? prev : q));
+    setPage((prev) => (prev === p ? prev : p));
+    setLimit((prev) => (prev === l ? prev : l));
+    setFilters((prev) => {
+      const isSame =
+        prev.index === s &&
+        isArrayEqual(prev.loaders, loadersList) &&
+        isArrayEqual(prev.versions, versionsList) &&
+        isArrayEqual(prev.categories, categoriesList) &&
+        isArrayEqual(prev.environments, environmentsList) &&
+        isArrayEqual(prev.sources || [], sourcesList);
+
+      if (isSame) return prev;
+      return {
+        loaders: loadersList,
+        versions: versionsList,
+        categories: categoriesList,
+        environments: environmentsList,
+        sources: sourcesList,
+        index: s,
+      };
+    });
+  }, [searchParams]);
+
   // Synchronize state back to URL query parameters
   useEffect(() => {
+    if (!isHydrated) return;
+
     const params = new URLSearchParams(window.location.search);
 
     if (debouncedQuery) params.set("q", debouncedQuery);
@@ -147,7 +189,8 @@ function SearchPageContent() {
     syncArray("sources", filters.sources || []);
 
     router.replace(`${pathname}?${params.toString()}`);
-  }, [debouncedQuery, page, limit, filters, pathname, router]);
+  }, [debouncedQuery, page, limit, filters, pathname, router, isHydrated]);
+
 
   // Merge categories & environments to pass to the Modrinth backend query
   const searchFilters: SearchFilters = useMemo(
@@ -196,6 +239,14 @@ function SearchPageContent() {
 
     return (
       <div className="flex items-center gap-1 shrink-0">
+        <button
+          disabled={page === 0}
+          onClick={() => setPage((p) => p - 1)}
+          className="size-7 rounded-full flex items-center justify-center hover:bg-accent hover:text-accent-foreground border bg-background border-border text-muted-foreground disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+          aria-label="Previous page"
+        >
+          &lt;
+        </button>
         {pages.map((p, idx) => {
           if (p === "...") {
             return (

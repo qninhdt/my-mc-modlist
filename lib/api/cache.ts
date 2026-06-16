@@ -1,10 +1,4 @@
-import { adminDb } from "@/lib/firebase/admin";
-
-// Server-side Firestore cache mirror. Every upstream API read flows through this
-// so 1000 users share one cached copy instead of each hitting ModpackIndex
-// (3,600 req/hr total cap) or Modrinth (300 req/min per IP — all users egress the
-// one Vercel IP). Tiered TTL: ID/detail lookups cache long (bounded key space),
-// search queries cache short and the collection is capped (unbounded query strings).\
+import { Redis } from "@upstash/redis";
 
 export type CacheTier = "detail" | "search";
 
@@ -13,11 +7,23 @@ const TTL_SECONDS: Record<CacheTier, number> = {
   search: 10 * 60, // 10min — search results, kept fresh-ish
 };
 
-// Firestore doc IDs can't contain "/" and cap at 1500 bytes. Normalize any key
-// (URLs, query strings) to a safe, bounded, collision-resistant id.
+// Lazy initialize Redis to prevent initialization errors if env vars are missing
+let redisInstance: Redis | null = null;
+function getRedis() {
+  if (!redisInstance) {
+    const url = process.env.UPSTASH_REDIS_REST_URL;
+    const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+    if (!url || !token) {
+      throw new Error("Missing UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN env variables");
+    }
+    redisInstance = new Redis({ url, token });
+  }
+  return redisInstance;
+}
+
+// Normalize key to a safe, collision-resistant identifier
 function safeDocId(key: string): string {
   const normalized = key.toLowerCase().trim();
-  // Replace unsafe chars; if too long, suffix with a hash to keep it unique.
   const cleaned = normalized.replace(/[^a-z0-9._-]+/g, "_");
   if (cleaned.length <= 200) return cleaned;
   let hash = 0;
@@ -27,43 +33,37 @@ function safeDocId(key: string): string {
   return `${cleaned.slice(0, 180)}_${(hash >>> 0).toString(36)}`;
 }
 
-type CacheDoc = {
-  payload: unknown;
-  fetchedAt: unknown; // Firestore Timestamp — typed loosely to avoid static import
-  ttlSeconds: number;
-};
-
-async function cacheRef(tier: CacheTier, key: string) {
-  const db = await adminDb();
-  return db.collection("cache").doc(`${tier}_${safeDocId(key)}`);
-}
-
 // Returns the cached payload if present and still fresh, else null.
 export async function cacheGet<T>(tier: CacheTier, key: string): Promise<T | null> {
-  const ref = await cacheRef(tier, key);
-  const snap = await ref.get();
-  if (!snap.exists) return null;
-  const data = snap.data() as CacheDoc | undefined;
-  if (!data) return null;
-  const fetchedAt = data.fetchedAt as { toMillis(): number };
-  const ageMs = Date.now() - fetchedAt.toMillis();
-  if (ageMs > data.ttlSeconds * 1000) return null;
-  return data.payload as T;
+  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+    return null; // Silent fallback to API fetch if Redis is not configured
+  }
+  try {
+    const redisKey = `cache:${tier}:${safeDocId(key)}`;
+    const redis = getRedis();
+    const data = await redis.get<T>(redisKey);
+    return data;
+  } catch (err) {
+    console.warn(`[Redis Cache Error] Failed to get key "${key}":`, err);
+    return null;
+  }
 }
 
 export async function cacheSet(tier: CacheTier, key: string, payload: unknown): Promise<void> {
-  const { Timestamp } = await import("firebase-admin/firestore");
-  const ref = await cacheRef(tier, key);
-  const doc: CacheDoc = {
-    payload,
-    fetchedAt: Timestamp.now(),
-    ttlSeconds: TTL_SECONDS[tier],
-  };
-  await ref.set(doc);
+  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+    return;
+  }
+  try {
+    const redisKey = `cache:${tier}:${safeDocId(key)}`;
+    const ttl = TTL_SECONDS[tier];
+    const redis = getRedis();
+    await redis.set(redisKey, payload, { ex: ttl });
+  } catch (err) {
+    console.warn(`[Redis Cache Error] Failed to set key "${key}":`, err);
+  }
 }
 
-// Wraps a fetcher with cache-aside semantics: serve fresh cache, else fetch +
-// store. The fetcher runs only on miss/stale, so it's where the upstream call lives.
+// Wraps a fetcher with cache-aside semantics: serve fresh cache, else fetch + store.
 export async function cached<T>(
   tier: CacheTier,
   key: string,

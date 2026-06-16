@@ -29,6 +29,10 @@ export async function GET(request: NextRequest) {
   const categories = csv("categories");
   const sources = csv("sources");
 
+  // Separate environments from categories
+  const environments = categories?.filter((c) => c === "client" || c === "server") ?? [];
+  const realCategories = categories?.filter((c) => c !== "client" && c !== "server") ?? [];
+
   // Determine which APIs to search
   const queryMPI = (!!query && !sources) || (sources && sources.includes("curseforge"));
   const queryMR = !sources || sources.includes("modrinth");
@@ -42,14 +46,15 @@ export async function GET(request: NextRequest) {
             query,
             loaders,
             versions,
-            categories,
+            categories: realCategories,
+            environments,
             index,
             offset,
             limit,
           })
         : Promise.resolve(null),
       queryMPI
-        ? getMpiModsSearch(query, page, limit, loaders || [], versions || [], categories || []).catch(() => null)
+        ? getMpiModsSearch(query, page, limit, loaders || [], versions || [], realCategories).catch(() => null)
         : Promise.resolve(null),
     ]);
 
@@ -115,7 +120,7 @@ export async function GET(request: NextRequest) {
                   slug: firstInfo.slug,
                   url: `https://modrinth.com/mod/${firstInfo.slug}`,
                 },
-                ...(curseforgeUrl ? { curseforge: { url: curseforgeUrl } } : {}),
+                curseforge: { url: curseforgeUrl || `https://www.curseforge.com/minecraft/mc-mods/${mpiMod.slug}` },
               },
               modrinthProjects: mpiModrinthInfos.map((info) => ({
                 projectId: info.project_id,
@@ -144,10 +149,22 @@ export async function GET(request: NextRequest) {
     }
 
     // Filter results if categories are explicitly chosen
-    const realCategories = categories?.filter((c) => c !== "client" && c !== "server");
     if (realCategories && realCategories.length > 0) {
       finalResults = finalResults.filter((mod) => {
         return mod.tags.some((t) => realCategories.includes(t.toLowerCase()));
+      });
+    }
+
+    // Filter results by environments if chosen
+    if (environments.length > 0) {
+      finalResults = finalResults.filter((mod) => {
+        const client = (mod.clientSide || "unknown").toLowerCase();
+        const server = (mod.serverSide || "unknown").toLowerCase();
+        return environments.every((env) => {
+          if (env === "client") return client !== "unsupported";
+          if (env === "server") return server !== "unsupported";
+          return true;
+        });
       });
     }
 

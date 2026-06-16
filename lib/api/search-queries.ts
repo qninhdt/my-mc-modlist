@@ -48,11 +48,15 @@ export function useModSearch(filters: SearchFilters) {
   });
 }
 
-export function useModDetail(modId: string) {
+export function useModDetail(modId: string, packId?: string | null) {
   return useQuery({
-    queryKey: ["mod-detail", modId],
-    queryFn: () =>
-      authedFetchJson<{ mod: ModView }>(`/api/mod/${encodeURIComponent(modId)}`),
+    queryKey: ["mod-detail", modId, packId],
+    queryFn: () => {
+      const url = packId
+        ? `/api/mod/${encodeURIComponent(modId)}?packId=${encodeURIComponent(packId)}`
+        : `/api/mod/${encodeURIComponent(modId)}`;
+      return authedFetchJson<{ mod: ModView }>(url);
+    },
     enabled: !!modId,
   });
 }

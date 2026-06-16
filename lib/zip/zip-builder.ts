@@ -111,16 +111,27 @@ export async function buildModpackZip(
 
         const blob = await response.blob();
         zip.file(`mods/${safeName}`, blob);
+        current++;
+        updateProgress("fetching", `Completed ${mod.name}`);
       } catch (err: any) {
+        if (err?.message === "Export cancelled by user") {
+          return;
+        }
         console.error(`Error downloading mod ${mod.name}:`, err);
         failedMods.push({
           name: mod.name,
           projectId: mod.projectId,
           error: err?.message || String(err),
         });
-      } finally {
         current++;
-        updateProgress("fetching", `Completed ${mod.name}`);
+        try {
+          updateProgress("fetching", `Completed ${mod.name}`);
+        } catch (progressErr: any) {
+          if (progressErr?.message === "Export cancelled by user") {
+            return;
+          }
+          throw progressErr;
+        }
       }
     }
   };

@@ -3,7 +3,7 @@
 import { useState, useMemo } from "react";
 import { ChevronDown, ChevronUp, Search, SlidersHorizontal } from "lucide-react";
 import { useMinecraftVersions } from "@/lib/minecraft/versions";
-import { cn } from "@/lib/utils";
+
 
 export type SortIndex = "relevance" | "downloads" | "newest" | "updated";
 

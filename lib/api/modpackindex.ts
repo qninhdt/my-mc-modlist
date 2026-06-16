@@ -1,7 +1,7 @@
 import { cached } from "./cache";
 import type { ModpackIndexMod } from "./types";
 import { mapCurseforgeCategory } from "./normalize";
-import { isSqliteDbAvailable, localGetMpiMod, localSearchMpiMods } from "./sqlite-helper";
+import { isSqliteDbAvailable, localGetMpiMod, localSearchMpiMods, localSearchMpiModsPaged } from "./sqlite-helper";
 
 // ModpackIndex v1 client. Used ONLY for cross-platform badge enrichment (does this
 // mod also exist on CurseForge?) — NOT as a search engine (it can't combine
@@ -37,10 +37,9 @@ export async function searchMods(
   limit: number = 20
 ): Promise<{ data: ModpackIndexMod[]; total: number } | null> {
   if (isSqliteDbAvailable()) {
-    const allMatching = await localSearchMpiMods(name || "", 250);
     const offset = (page - 1) * limit;
-    const sliced = allMatching.slice(offset, offset + limit);
-    return { data: sliced, total: allMatching.length };
+    const { hits, total } = await localSearchMpiModsPaged(name || "", { offset, limit });
+    return { data: hits, total };
   }
 
   const queryTerm = name?.toLowerCase().trim() ?? "";
@@ -82,10 +81,16 @@ export async function searchAndFilterMpiMods(
 ): Promise<ModpackIndexMod[]> {
   const cacheKey = `mpi:filtered-search:${query}:${(loaders ?? []).join(",")}:${(versions ?? []).join(",")}:${(categories ?? []).join(",")}`;
   return cached("search", cacheKey, async () => {
-    let allMods: ModpackIndexMod[] = [];
+    const allMods: ModpackIndexMod[] = [];
     
     if (isSqliteDbAvailable()) {
-      allMods = await localSearchMpiMods(query, 250);
+      const { hits } = await localSearchMpiModsPaged(query, {
+        loaders,
+        versions,
+        categories,
+        limit: 250
+      });
+      return hits;
     } else {
       const limit = 100;
       // Fetch up to 3 pages of 100 results to cover the max 250 matches
@@ -172,6 +177,18 @@ export async function getMpiModsSearch(
   versions: string[],
   categories: string[]
 ): Promise<{ data: ModpackIndexMod[]; total: number }> {
+  if (isSqliteDbAvailable()) {
+    const offset = (page - 1) * limit;
+    const { hits, total } = await localSearchMpiModsPaged(query, {
+      loaders,
+      versions,
+      categories,
+      offset,
+      limit
+    });
+    return { data: hits, total };
+  }
+
   const queryTerm = query.trim();
 
   if (queryTerm) {

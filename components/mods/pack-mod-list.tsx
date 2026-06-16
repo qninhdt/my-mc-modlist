@@ -13,7 +13,7 @@ import { ManualBadge } from "./manual-badge";
 import { ManualModWizard } from "./manual-mod-wizard";
 import { cn } from "@/lib/utils";
 
-import { useDeleteManualJar } from "@/lib/modpacks/mod-queries";
+import { useDeleteManualJar, useUpdatePackMod } from "@/lib/modpacks/mod-queries";
 
 // The mods currently in a pack. Shows version pin (P4), update badge, side badges.
 // Editors get a remove button; the row links to the mod detail page.
@@ -24,7 +24,6 @@ export function PackModList({
   removingId,
   updateResults,
   packId,
-  isOwner,
   profiles,
 }: {
   mods: PackMod[];
@@ -33,12 +32,21 @@ export function PackModList({
   removingId?: string | null;
   updateResults?: Map<string, UpdateCheckResult>;
   packId: string;
-  isOwner: boolean;
   profiles?: Record<string, { displayName: string | null; email: string | null }>;
 }) {
   const [activeWizardMod, setActiveWizardMod] = useState<PackMod | null>(null);
   const [openDropdownModId, setOpenDropdownModId] = useState<string | null>(null);
   const { mutate: deleteJar } = useDeleteManualJar(packId);
+  const { mutate: updateMod } = useUpdatePackMod(packId);
+
+  const handleUpdateSide = (modId: string, side: "clientSide" | "serverSide", value: string) => {
+    updateMod({
+      modId,
+      data: {
+        [side]: value,
+      },
+    });
+  };
 
   if (mods.length === 0) {
     return (
@@ -62,7 +70,7 @@ export function PackModList({
             )}
           >
             <Link
-              href={`/mods/${encodeURIComponent(mod.projectId)}`}
+              href={`/mods/${encodeURIComponent(mod.projectId)}?packId=${packId}`}
               className="absolute inset-0 z-0"
               aria-label={`View details for ${mod.name}`}
             />
@@ -83,10 +91,47 @@ export function PackModList({
               <div className="min-w-0 flex-1">
                 <p className="truncate font-medium">{mod.name}</p>
                 <div className="flex flex-wrap items-center gap-2 pt-0.5">
-                  <SideBadges
-                    clientSide={mod.clientSide as SideSupport}
-                    serverSide={mod.serverSide as SideSupport}
-                  />
+                  {canEdit && (mod.curseforgeManual || mod.projectId.startsWith("cf:") || mod.projectId.startsWith("custom-")) ? (
+                    <div className="pointer-events-auto flex items-center gap-1.5">
+                      <select
+                        value={mod.clientSide || "unknown"}
+                        onChange={(e) => handleUpdateSide(mod.id, "clientSide", e.target.value)}
+                        className={cn(
+                          "rounded px-2 py-0.5 text-[10px] font-semibold border cursor-pointer focus-visible:outline-none focus:ring-1 focus:ring-ring transition shadow-xs",
+                          mod.clientSide === "required" && "bg-primary/15 text-primary border-primary/20",
+                          mod.clientSide === "optional" && "bg-secondary text-secondary-foreground border-secondary",
+                          (mod.clientSide === "unsupported" || !mod.clientSide || mod.clientSide === "unknown") && "bg-muted text-muted-foreground border-muted"
+                        )}
+                        title="Client Side Support"
+                      >
+                        <option value="required" className="bg-background text-foreground">Client: Required</option>
+                        <option value="optional" className="bg-background text-foreground">Client: Optional</option>
+                        <option value="unsupported" className="bg-background text-foreground">Client: Unsupported</option>
+                        <option value="unknown" className="bg-background text-foreground">Client: Unknown</option>
+                      </select>
+                      <select
+                        value={mod.serverSide || "unknown"}
+                        onChange={(e) => handleUpdateSide(mod.id, "serverSide", e.target.value)}
+                        className={cn(
+                          "rounded px-2 py-0.5 text-[10px] font-semibold border cursor-pointer focus-visible:outline-none focus:ring-1 focus:ring-ring transition shadow-xs",
+                          mod.serverSide === "required" && "bg-primary/15 text-primary border-primary/20",
+                          mod.serverSide === "optional" && "bg-secondary text-secondary-foreground border-secondary",
+                          (mod.serverSide === "unsupported" || !mod.serverSide || mod.serverSide === "unknown") && "bg-muted text-muted-foreground border-muted"
+                        )}
+                        title="Server Side Support"
+                      >
+                        <option value="required" className="bg-background text-foreground">Server: Required</option>
+                        <option value="optional" className="bg-background text-foreground">Server: Optional</option>
+                        <option value="unsupported" className="bg-background text-foreground">Server: Unsupported</option>
+                        <option value="unknown" className="bg-background text-foreground">Server: Unknown</option>
+                      </select>
+                    </div>
+                  ) : (
+                    <SideBadges
+                      clientSide={mod.clientSide as SideSupport}
+                      serverSide={mod.serverSide as SideSupport}
+                    />
+                  )}
                   {mod.categories && mod.categories.map((cat) => (
                     <span
                       key={cat}

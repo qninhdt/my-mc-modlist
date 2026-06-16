@@ -4,7 +4,7 @@ import { use, useMemo, useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import { useMutation } from "@tanstack/react-query";
-import { RefreshCw, Loader2, ListFilter, MessageSquare, History, Plus, Search, X, Monitor, Server, Globe, Layers, Filter } from "lucide-react";
+import { RefreshCw, Loader2, ListFilter, MessageSquare, History, Plus, Search, X, Monitor, Server, Globe, Layers, Filter, Upload } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/lib/auth/use-auth";
 import { useModpack, useDeletePack } from "@/lib/modpacks/queries";
@@ -20,6 +20,9 @@ import { Button } from "@/components/ui/button";
 import { ExportMenu } from "@/components/modpacks/export-menu";
 import type { UpdateCheckResult } from "@/lib/resolve/types";
 import { fetchUserProfiles, type UserProfile } from "@/lib/sharing/membership";
+import { useQueryClient } from "@tanstack/react-query";
+import { ImportPackDialog } from "@/components/modpacks/import-pack-dialog";
+import { AddCustomModDialog } from "@/components/mods/add-custom-mod-dialog";
 
 export default function PackDetailPage({
   params,
@@ -33,7 +36,23 @@ export default function PackDetailPage({
   const { mutate: removePack, isPending: deleting } = useDeletePack();
   const { data: mods } = usePackMods(packId);
 
-  const [activeTab, setActiveTab] = useState<"mods" | "activity" | "snapshots">("mods");
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
+  const rawTab = searchParams.get("tab");
+  const activeTab = (rawTab === "mods" || rawTab === "activity" || rawTab === "snapshots") ? rawTab : "mods";
+
+  const handleTabChange = (tab: "mods" | "activity" | "snapshots") => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("tab", tab);
+    if (tab !== "mods") {
+      params.delete("page");
+      params.delete("q");
+      params.delete("environments");
+      params.delete("sources");
+      params.delete("categories");
+    }
+    router.replace(`${pathname}?${params.toString()}`);
+  };
   const [profiles, setProfiles] = useState<Record<string, UserProfile>>({});
 
   useEffect(() => {
@@ -84,7 +103,7 @@ export default function PackDetailPage({
       {/* Tabs Switcher */}
       <div className="border-b flex gap-6 text-sm font-medium overflow-x-auto whitespace-nowrap scrollbar-none w-full">
         <button
-          onClick={() => setActiveTab("mods")}
+          onClick={() => handleTabChange("mods")}
           className={`pb-3 border-b-2 px-1 cursor-pointer transition-colors flex items-center gap-1.5 shrink-0 ${
             activeTab === "mods"
               ? "border-primary text-primary"
@@ -95,7 +114,7 @@ export default function PackDetailPage({
           Mods ({mods?.length ?? 0})
         </button>
         <button
-          onClick={() => setActiveTab("activity")}
+          onClick={() => handleTabChange("activity")}
           className={`pb-3 border-b-2 px-1 cursor-pointer transition-colors flex items-center gap-1.5 shrink-0 ${
             activeTab === "activity"
               ? "border-primary text-primary"
@@ -107,7 +126,7 @@ export default function PackDetailPage({
         </button>
         {canEdit && (
           <button
-            onClick={() => setActiveTab("snapshots")}
+            onClick={() => handleTabChange("snapshots")}
             className={`pb-3 border-b-2 px-1 cursor-pointer transition-colors flex items-center gap-1.5 shrink-0 ${
               activeTab === "snapshots"
                 ? "border-primary text-primary"
@@ -162,6 +181,9 @@ function PackModsSection({
   const { data: mods, isLoading } = usePackMods(packId);
   const { mutate: removeMod, variables: removingId } = useRemovePackMod(packId);
   const isOwner = !!(user && pack && user.uid === pack.ownerUid);
+  const queryClient = useQueryClient();
+  const [showImportDialog, setShowImportDialog] = useState(false);
+  const [showCustomModDialog, setShowCustomModDialog] = useState(false);
 
   const { mutate: updateMod } = useUpdatePackMod(packId);
   const checkedProjectsRef = useRef<Set<string>>(new Set());
@@ -373,23 +395,119 @@ function PackModsSection({
     return filteredMods.slice(start, start + pageSize);
   }, [filteredMods, page, pageSize]);
 
+  // Custom Modrinth-style pagination renderer
+  const renderPagination = () => {
+    if (totalPages <= 1) return null;
+    const pages: (number | string)[] = [];
+
+    if (totalPages <= 5) {
+      for (let i = 0; i < totalPages; i++) pages.push(i);
+    } else {
+      pages.push(0);
+      if (page > 2) {
+        pages.push("...");
+      }
+
+      const start = Math.max(1, page - 1);
+      const end = Math.min(totalPages - 2, page + 1);
+      for (let i = start; i <= end; i++) {
+        pages.push(i);
+      }
+
+      if (page < totalPages - 3) {
+        pages.push("...");
+      }
+      pages.push(totalPages - 1);
+    }
+
+    return (
+      <div className="flex items-center gap-1 shrink-0">
+        <button
+          disabled={page === 0}
+          onClick={() => setPage((p) => p - 1)}
+          className="size-7 rounded-full flex items-center justify-center hover:bg-accent hover:text-accent-foreground border bg-background border-border text-muted-foreground disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+          aria-label="Previous page"
+        >
+          &lt;
+        </button>
+        {pages.map((p, idx) => {
+          if (p === "...") {
+            return (
+              <span key={`dots-${idx}`} className="px-1 text-xs text-muted-foreground select-none">
+                ...
+              </span>
+            );
+          }
+          const pageNum = p as number;
+          const active = pageNum === page;
+          return (
+            <button
+              key={pageNum}
+              onClick={() => setPage(pageNum)}
+              className={cn(
+                "size-7 rounded-full flex items-center justify-center text-xs font-semibold cursor-pointer transition-colors border",
+                active
+                  ? "bg-primary text-primary-foreground font-bold border-primary"
+                  : "hover:bg-accent hover:text-accent-foreground bg-background border-border"
+              )}
+            >
+              {pageNum + 1}
+            </button>
+          );
+        })}
+        <button
+          disabled={page >= totalPages - 1}
+          onClick={() => setPage((p) => p + 1)}
+          className="size-7 rounded-full flex items-center justify-center hover:bg-accent hover:text-accent-foreground border bg-background border-border text-muted-foreground disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+          aria-label="Next page"
+        >
+          &gt;
+        </button>
+      </div>
+    );
+  };
+
   return (
     <section className="space-y-4">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <h2 className="font-display text-lg font-medium">Mods</h2>
         <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
-          {/* Add Mod button */}
+          {/* Add Mod buttons */}
           {canEdit && (
-            <Button
-              asChild
-              size="sm"
-              className="cursor-pointer font-medium bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm"
-            >
-              <Link href={`/search?packId=${packId}`}>
-                <Plus className="mr-1.5 size-4" />
-                Add Mod
-              </Link>
-            </Button>
+            <>
+              <Button
+                asChild
+                size="sm"
+                className="cursor-pointer font-medium bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm"
+              >
+                <Link href={`/search?packId=${packId}`}>
+                  <Plus className="mr-1.5 size-4" />
+                  Add Mod
+                </Link>
+              </Button>
+
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setShowCustomModDialog(true)}
+                className="cursor-pointer font-medium shadow-sm"
+              >
+                <Plus className="mr-1.5 size-4 text-primary" />
+                Add Custom Mod
+              </Button>
+
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setShowImportDialog(true)}
+                className="cursor-pointer font-medium shadow-sm"
+              >
+                <Upload className="mr-1.5 size-4 text-primary" />
+                Import Pack
+              </Button>
+            </>
           )}
 
           {/* Check updates button */}
@@ -428,7 +546,6 @@ function PackModsSection({
           mods={[]}
           canEdit={canEdit}
           packId={packId}
-          isOwner={isOwner}
         />
       ) : (
         <div className="grid gap-6 md:grid-cols-[260px_1fr] items-start pt-2">
@@ -476,6 +593,18 @@ function PackModsSection({
               </button>
             </div>
 
+            {/* Top Pagination Control Strip */}
+            {totalPages > 1 && (
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-muted/20 p-2 border sm:p-2.5 rounded-xl shadow-sm text-xs font-semibold text-foreground/80">
+                <div className="text-muted-foreground font-medium text-center sm:text-left">
+                  Showing {page * pageSize + 1}–{Math.min((page + 1) * pageSize, totalHits)} of {totalHits} mods
+                </div>
+                <div className="w-full sm:w-auto flex justify-center sm:justify-end">
+                  {renderPagination()}
+                </div>
+              </div>
+            )}
+
             {isLoading ? (
               <p className="text-sm text-muted-foreground">Loading mods…</p>
             ) : (
@@ -487,35 +616,17 @@ function PackModsSection({
                   removingId={typeof removingId === "string" ? removingId : null}
                   updateResults={updateResults.size > 0 ? updateResults : undefined}
                   packId={packId}
-                  isOwner={isOwner}
                   profiles={profiles}
                 />
 
                 {/* Local Pagination Controls */}
                 {totalPages > 1 && (
-                  <div className="flex items-center justify-between border-t pt-4">
-                    <p className="text-xs text-muted-foreground">
+                  <div className="flex flex-col sm:flex-row items-center justify-between gap-3 border-t pt-5">
+                    <p className="text-xs text-muted-foreground font-medium text-center sm:text-left">
                       Showing {page * pageSize + 1}–{Math.min((page + 1) * pageSize, totalHits)} of {totalHits} mods
                     </p>
-                    <div className="flex gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={page === 0}
-                        onClick={() => setPage((p) => p - 1)}
-                        className="cursor-pointer"
-                      >
-                        Previous
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={page >= totalPages - 1}
-                        onClick={() => setPage((p) => p + 1)}
-                        className="cursor-pointer"
-                      >
-                        Next
-                      </Button>
+                    <div className="flex justify-center">
+                      {renderPagination()}
                     </div>
                   </div>
                 )}
@@ -564,6 +675,30 @@ function PackModsSection({
         </div>
       )}
 
+
+      {showImportDialog && (
+        <ImportPackDialog
+          packId={packId}
+          onCloseAction={() => setShowImportDialog(false)}
+          onImportCompleteAction={() => {
+            queryClient.invalidateQueries({ queryKey: ["pack-mods", packId] });
+            queryClient.invalidateQueries({ queryKey: ["pack", packId] });
+          }}
+        />
+      )}
+
+      {showCustomModDialog && (
+        <AddCustomModDialog
+          packId={packId}
+          mcVersion={pack.mcVersion}
+          loader={pack.loader}
+          onCloseAction={() => setShowCustomModDialog(false)}
+          onSuccessAction={() => {
+            queryClient.invalidateQueries({ queryKey: ["pack-mods", packId] });
+            queryClient.invalidateQueries({ queryKey: ["pack", packId] });
+          }}
+        />
+      )}
 
     </section>
   );

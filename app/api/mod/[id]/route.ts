@@ -3,7 +3,8 @@ import { getProject, getProjectMembers } from "@/lib/api/modrinth";
 import { searchMods, getMod } from "@/lib/api/modpackindex";
 import { normalizeProject, normalizeCurseforgeOnly, mapCurseforgeCategory } from "@/lib/api/normalize";
 import type { ModpackIndexMod } from "@/lib/api/types";
-import { isSqliteDbAvailable, localGetCurseforgeMod } from "@/lib/api/sqlite-helper";
+import { isSqliteDbAvailable, localGetCurseforgeMod, localGetModBySlug } from "@/lib/api/sqlite-helper";
+import { adminDb } from "@/lib/firebase/admin";
 
 export const runtime = "nodejs";
 
@@ -20,11 +21,87 @@ export async function GET(
 
   const decodedId = decodeURIComponent(id);
 
-  if (decodedId.startsWith("cf:")) {
+  if (decodedId.startsWith("custom-")) {
+    const packId = request.nextUrl.searchParams.get("packId");
+    if (!packId) {
+      return NextResponse.json({ error: "Missing packId query parameter for custom mod lookup" }, { status: 400 });
+    }
     try {
-      const mpiId = parseInt(decodedId.slice(3), 10);
+      const db = await adminDb();
+      const docRef = db.collection("modpacks").doc(packId).collection("mods").doc(decodedId);
+      const snap = await docRef.get();
+      if (!snap.exists) {
+        return NextResponse.json({ error: "Custom mod not found in this pack" }, { status: 404 });
+      }
+      const data = snap.data();
+      const mod = {
+        id: data?.projectId,
+        name: data?.name,
+        summary: data?.summary || "",
+        iconUrl: data?.iconUrl || null,
+        tags: data?.categories || [],
+        clientSide: data?.clientSide || "unknown",
+        serverSide: data?.serverSide || "unknown",
+        downloads: 0,
+        sources: {},
+        modrinthProjects: [],
+        curseforgeManual: true,
+        body: data?.summary || "Manual custom mod",
+        published: data?.uploadedAt || data?.createdAt || null,
+        updated: data?.uploadedAt || data?.createdAt || null,
+        gallery: [],
+        members: [],
+        discordUrl: null,
+        issuesUrl: null,
+        sourceUrl: null,
+        wikiUrl: null,
+      };
+      return NextResponse.json({ mod });
+    } catch (err: any) {
+      console.error("Failed to load custom mod details:", err);
+      return NextResponse.json({ error: err?.message || "Internal server error" }, { status: 500 });
+    }
+  }
+
+  const isCf = decodedId.startsWith("cf:") || /^\d+$/.test(decodedId);
+  if (isCf) {
+    try {
+      const cfSlugOrId = decodedId.startsWith("cf:")
+        ? decodedId.slice(3)
+        : decodedId;
+      
+      let mpiId = parseInt(cfSlugOrId, 10);
+
       if (isNaN(mpiId)) {
-        return NextResponse.json({ error: "Invalid CurseForge mod ID" }, { status: 400 });
+        // Look up by slug in SQLite
+        if (isSqliteDbAvailable()) {
+          const localMod = await localGetModBySlug(cfSlugOrId);
+          if (localMod) {
+            mpiId = localMod.mpi_id || localMod.curse_id || parseInt(localMod.id, 10);
+          }
+        }
+
+        // If not found in SQLite, fetch from cfwidget using the slug
+        if (isNaN(mpiId)) {
+          try {
+            const res = await fetch(`https://api.cfwidget.com/${cfSlugOrId}`, {
+              headers: { "User-Agent": "qninhdt/my-mc-modlist/0.1.0" },
+              next: { revalidate: 3600 },
+            });
+            if (res.ok) {
+              const cfData = await res.json();
+              if (cfData && cfData.id) {
+                mpiId = cfData.id;
+              }
+            }
+          } catch (err) {
+            console.warn("Failed to fetch CFWidget data by slug in mod detail:", err);
+          }
+        }
+      }
+
+      if (isNaN(mpiId)) {
+        return NextResponse.json({ error: "Invalid CurseForge mod ID or slug" }, { status: 400 });
       }
 
       const mpiMod = await getMod(mpiId);

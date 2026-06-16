@@ -14,10 +14,10 @@ export default function ModDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
-  const { data, isLoading, isError, error } = useModDetail(id);
   const router = useRouter();
   const searchParams = useSearchParams();
   const packId = searchParams.get("packId");
+  const { data, isLoading, isError, error } = useModDetail(id, packId);
 
   const handleBack = () => {
     if (packId) {

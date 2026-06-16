@@ -2,7 +2,8 @@ import fs from "fs";
 import path from "path";
 import zlib from "zlib";
 import { createClient } from "@libsql/client";
-import type { ModpackIndexMod, ModrinthProject, ModrinthSearchHit, SideSupport } from "./types";
+import type { ModpackIndexMod, ModrinthProject, ModrinthSearchHit, SideSupport, ModrinthVersion, ModrinthTeamMember } from "./types";
+
 
 // Returns true if Turso database is available via environment variables
 export function isSqliteDbAvailable(): boolean {
@@ -28,6 +29,16 @@ function getDb() {
 
 // Mapper for ModpackIndexMod
 function mapMpiMod(row: any): ModpackIndexMod {
+  const parseJsonArray = (val: any) => {
+    if (!val) return [];
+    try {
+      const parsed = typeof val === "string" ? JSON.parse(val) : val;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+
   return {
     id: Number(row.id),
     name: row.name as string,
@@ -39,8 +50,12 @@ function mapMpiMod(row: any): ModpackIndexMod {
     curse_info: row.curse_id ? { curse_id: Number(row.curse_id) } : null,
     modrinth_info: row.modrinth_info_json ? JSON.parse(row.modrinth_info_json as string) : [],
     authors: row.authors_json ? JSON.parse(row.authors_json as string) : [],
-    categories: row.categories_json ? JSON.parse(row.categories_json as string) : [],
-    minecraft_versions: row.versions_json ? JSON.parse(row.versions_json as string) : [],
+    categories: parseJsonArray(row.categories_json).map((c: any) => 
+      typeof c === "object" && c !== null ? c : { id: 0, name: String(c), slug: String(c) }
+    ),
+    minecraft_versions: parseJsonArray(row.versions_json).map((v: any) => 
+      typeof v === "object" && v !== null ? v : { id: 0, name: String(v), slug: String(v) }
+    ),
     latest_release_date: (row.latest_release_date as string) || null,
     last_updated: (row.last_updated as string) || null
   };
@@ -50,8 +65,18 @@ export async function localGetMpiMod(id: number): Promise<ModpackIndexMod | null
   try {
     const db = getDb();
     const res = await db.execute({
-      sql: "SELECT * FROM mods WHERE id = ?",
-      args: [id]
+      sql: `
+        SELECT 
+          m.*,
+          json_object('curseforge', m.curseforge_url, 'modrinth', m.modrinth_url) as links_json,
+          CASE WHEN m.modrinth_id IS NOT NULL THEN json_array(json_object('project_id', m.modrinth_id, 'slug', m.slug, 'loaders', json(COALESCE(m.loaders_json, '[]')))) ELSE '[]' END as modrinth_info_json,
+          (SELECT json_group_array(json_object('name', a.name, 'url', a.url)) FROM authors a JOIN mod_authors ma ON a.id = ma.author_id WHERE ma.mod_id = m.id) as authors_json,
+          m.categories_json as categories_json,
+          m.versions_json as versions_json
+        FROM mods m
+        WHERE m.mpi_id = ? OR m.curse_id = ? OR m.id = ?
+      `,
+      args: [id, id, String(id)]
     });
     const row = res.rows[0];
     if (!row) return null;
@@ -70,18 +95,43 @@ export async function localSearchMpiMods(query: string, limit = 250): Promise<Mo
     let res;
     if (!queryTerm) {
       res = await db.execute({
-        sql: "SELECT * FROM mods ORDER BY download_count DESC LIMIT ?",
+        sql: `
+          SELECT 
+            m.*,
+            json_object('curseforge', m.curseforge_url, 'modrinth', m.modrinth_url) as links_json,
+            CASE WHEN m.modrinth_id IS NOT NULL THEN json_array(json_object('project_id', m.modrinth_id, 'slug', m.slug, 'loaders', json(COALESCE(m.loaders_json, '[]')))) ELSE '[]' END as modrinth_info_json,
+            (SELECT json_group_array(json_object('name', a.name, 'url', a.url)) FROM authors a JOIN mod_authors ma ON a.id = ma.author_id WHERE ma.mod_id = m.id) as authors_json,
+            m.categories_json as categories_json,
+            m.versions_json as versions_json
+          FROM mods m 
+          ORDER BY m.download_count DESC 
+          LIMIT ?
+        `,
         args: [limit]
       });
     } else {
+      const cleanedWords = queryTerm.replace(/[^a-zA-Z0-9\s]/g, "").trim().split(/\s+/).filter(Boolean);
+      if (cleanedWords.length === 0) {
+        return [];
+      }
+      const ftsQuery = cleanedWords.map(w => `${w}*`).join(" AND ");
+
       res = await db.execute({
         sql: `
-          SELECT * FROM mods 
-          WHERE name LIKE ? OR slug LIKE ? OR summary LIKE ?
-          ORDER BY download_count DESC 
+          SELECT 
+            m.*,
+            json_object('curseforge', m.curseforge_url, 'modrinth', m.modrinth_url) as links_json,
+            CASE WHEN m.modrinth_id IS NOT NULL THEN json_array(json_object('project_id', m.modrinth_id, 'slug', m.slug, 'loaders', json(COALESCE(m.loaders_json, '[]')))) ELSE '[]' END as modrinth_info_json,
+            (SELECT json_group_array(json_object('name', a.name, 'url', a.url)) FROM authors a JOIN mod_authors ma ON a.id = ma.author_id WHERE ma.mod_id = m.id) as authors_json,
+            m.categories_json as categories_json,
+            m.versions_json as versions_json
+          FROM mods_fts f
+          JOIN mods m ON f.rowid = m.rowid
+          WHERE mods_fts MATCH ?
+          ORDER BY m.download_count DESC 
           LIMIT ?
         `,
-        args: [`%${queryTerm}%`, `%${queryTerm}%`, `%${queryTerm}%`, limit]
+        args: [ftsQuery, limit]
       });
     }
     
@@ -92,10 +142,151 @@ export async function localSearchMpiMods(query: string, limit = 250): Promise<Mo
   }
 }
 
+export async function localSearchMpiModsPaged(
+  query: string,
+  opts: {
+    loaders?: string[];
+    versions?: string[];
+    categories?: string[];
+    sort?: "relevance" | "downloads" | "follows" | "newest" | "updated";
+    offset?: number;
+    limit?: number;
+  } = {}
+): Promise<{ hits: ModpackIndexMod[]; total: number }> {
+  try {
+    const db = getDb();
+    const queryTerm = query.trim().toLowerCase();
+    const limitVal = opts.limit ?? 20;
+    const offsetVal = opts.offset ?? 0;
+
+    const whereParts: string[] = ["m.curse_id IS NOT NULL"];
+    const args: any[] = [];
+
+    // FTS search term
+    if (queryTerm) {
+      const cleanedWords = queryTerm.replace(/[^a-zA-Z0-9\s]/g, "").trim().split(/\s+/).filter(Boolean);
+      if (cleanedWords.length === 0) {
+        return { hits: [], total: 0 };
+      }
+      const ftsQuery = cleanedWords.map(w => `${w}*`).join(" AND ");
+      whereParts.push("f.mods_fts MATCH ?");
+      args.push(ftsQuery);
+    }
+
+    // Loaders filter
+    if (opts.loaders?.length) {
+      const loaderOrs = opts.loaders.map(() => "m.loaders_json LIKE ?").join(" OR ");
+      whereParts.push(`(${loaderOrs})`);
+      opts.loaders.forEach(l => args.push(`%"${l}"%`));
+    }
+
+    // Versions filter
+    if (opts.versions?.length) {
+      const versionOrs = opts.versions.map(() => "m.versions_json LIKE ?").join(" OR ");
+      whereParts.push(`(${versionOrs})`);
+      opts.versions.forEach(v => args.push(`%"${v}"%`));
+    }
+
+    // Categories filter (matches categories_json or loaders_json)
+    if (opts.categories?.length) {
+      const catOrs = opts.categories.map(() => "(m.categories_json LIKE ? OR m.loaders_json LIKE ?)").join(" OR ");
+      whereParts.push(`(${catOrs})`);
+      opts.categories.forEach(c => {
+        args.push(`%"${c}"%`);
+        args.push(`%"${c}"%`);
+      });
+    }
+
+    const whereClause = whereParts.length > 0 ? `WHERE ${whereParts.join(" AND ")}` : "";
+
+    // Determine sorting
+    let orderBy = "m.download_count DESC";
+    const sort = opts.sort ?? "relevance";
+    if (sort === "downloads") {
+      orderBy = "m.download_count DESC";
+    } else if (sort === "follows") {
+      orderBy = "m.popularity_rank DESC";
+    } else if (sort === "newest") {
+      orderBy = "m.published DESC";
+    } else if (sort === "updated") {
+      orderBy = "m.updated DESC";
+    } else if (sort === "relevance") {
+      orderBy = queryTerm ? "rank" : "m.download_count DESC";
+    }
+
+    // 1. Get total count
+    const countSql = queryTerm
+      ? `SELECT COUNT(*) as count FROM mods_fts f JOIN mods m ON f.rowid = m.rowid ${whereClause}`
+      : `SELECT COUNT(*) as count FROM mods m ${whereClause}`;
+
+    const countRes = await db.execute({
+      sql: countSql,
+      args
+    });
+    const total = Number(countRes.rows[0]?.count ?? 0);
+
+    if (total === 0) {
+      return { hits: [], total: 0 };
+    }
+
+    // 2. Fetch page results
+    const selectSql = queryTerm
+      ? `
+        SELECT 
+          m.*,
+          json_object('curseforge', m.curseforge_url, 'modrinth', m.modrinth_url) as links_json,
+          CASE WHEN m.modrinth_id IS NOT NULL THEN json_array(json_object('project_id', m.modrinth_id, 'slug', m.slug, 'loaders', json(COALESCE(m.loaders_json, '[]')))) ELSE '[]' END as modrinth_info_json,
+          (SELECT json_group_array(json_object('name', a.name, 'url', a.url)) FROM authors a JOIN mod_authors ma ON a.id = ma.author_id WHERE ma.mod_id = m.id) as authors_json,
+          m.categories_json as categories_json,
+          m.versions_json as versions_json
+        FROM mods_fts f
+        JOIN mods m ON f.rowid = m.rowid
+        ${whereClause}
+        ORDER BY ${orderBy}
+        LIMIT ? OFFSET ?
+      `
+      : `
+        SELECT 
+          m.*,
+          json_object('curseforge', m.curseforge_url, 'modrinth', m.modrinth_url) as links_json,
+          CASE WHEN m.modrinth_id IS NOT NULL THEN json_array(json_object('project_id', m.modrinth_id, 'slug', m.slug, 'loaders', json(COALESCE(m.loaders_json, '[]')))) ELSE '[]' END as modrinth_info_json,
+          (SELECT json_group_array(json_object('name', a.name, 'url', a.url)) FROM authors a JOIN mod_authors ma ON a.id = ma.author_id WHERE ma.mod_id = m.id) as authors_json,
+          m.categories_json as categories_json,
+          m.versions_json as versions_json
+        FROM mods m
+        ${whereClause}
+        ORDER BY ${orderBy}
+        LIMIT ? OFFSET ?
+      `;
+
+    const selectArgs = [...args, limitVal, offsetVal];
+    const res = await db.execute({
+      sql: selectSql,
+      args: selectArgs
+    });
+
+    const hits = res.rows.map(mapMpiMod);
+    return { hits, total };
+  } catch (err) {
+    console.error(`[SQLite Error] Failed to search MPI mods:`, err);
+    return { hits: [], total: 0 };
+  }
+}
+
+
 // Mapper for ModrinthProject
 function mapModrinthProject(row: any): ModrinthProject & { game_versions?: string[] } {
-  const body = row.body_compressed
-    ? zlib.inflateSync(Buffer.from(row.body_compressed as Uint8Array)).toString("utf-8")
+  let bodyBuffer: Buffer | null = null;
+  if (row.body_compressed) {
+    if (typeof row.body_compressed === "object" && row.body_compressed.type === "Buffer") {
+      bodyBuffer = Buffer.from(row.body_compressed.data);
+    } else {
+      bodyBuffer = Buffer.from(row.body_compressed as ArrayBuffer);
+    }
+  }
+
+  const body = bodyBuffer
+    ? zlib.inflateSync(bodyBuffer).toString("utf-8")
     : (row.description as string) || "";
 
   return {
@@ -117,7 +308,8 @@ function mapModrinthProject(row: any): ModrinthProject & { game_versions?: strin
     wiki_url: (row.wiki_url as string) || undefined,
     body: body,
     published: (row.published as string) || undefined,
-    updated: (row.updated as string) || undefined
+    updated: (row.updated as string) || undefined,
+    gallery: row.gallery ? JSON.parse(row.gallery as string) : []
   };
 }
 
@@ -125,8 +317,33 @@ export async function localGetModrinthProject(idOrSlug: string): Promise<Modrint
   try {
     const db = getDb();
     const res = await db.execute({
-      sql: "SELECT * FROM modrinth_projects WHERE id = ? OR slug = ?",
-      args: [idOrSlug, idOrSlug]
+      sql: `
+        SELECT 
+          m.id,
+          m.slug,
+          m.name as title,
+          m.summary as description,
+          d.description_compressed as body_compressed,
+          m.download_count as downloads,
+          m.popularity_rank as followers,
+          m.thumbnail_url as icon_url,
+          m.client_side,
+          m.server_side,
+          m.discord_url,
+          m.source_url,
+          m.issues_url,
+          m.wiki_url,
+          m.published,
+          m.updated,
+          COALESCE(m.categories_json, '[]') as categories,
+          COALESCE(m.loaders_json, '[]') as loaders,
+          COALESCE(m.versions_json, '[]') as game_versions,
+          COALESCE(m.gallery_json, '[]') as gallery
+        FROM mods m
+        LEFT JOIN mod_descriptions d ON m.id = d.mod_id
+        WHERE m.id = ? OR m.slug = ? OR m.modrinth_id = ?
+      `,
+      args: [idOrSlug, idOrSlug, idOrSlug]
     });
     const row = res.rows[0];
     if (!row) return null;
@@ -137,31 +354,145 @@ export async function localGetModrinthProject(idOrSlug: string): Promise<Modrint
   }
 }
 
-export async function localSearchModrinthProjects(query: string, limit = 100): Promise<(ModrinthSearchHit & { game_versions?: string[] })[]> {
+export async function localSearchModrinthProjects(
+  query: string,
+  opts: {
+    loaders?: string[];
+    versions?: string[];
+    categories?: string[];
+    environments?: string[];
+    sort?: "relevance" | "downloads" | "follows" | "newest" | "updated";
+    offset?: number;
+    limit?: number;
+  } = {}
+): Promise<{ hits: (ModrinthSearchHit & { game_versions?: string[] })[]; total: number }> {
   try {
     const db = getDb();
     const queryTerm = query.trim().toLowerCase();
-    
-    let res;
-    if (!queryTerm) {
-      res = await db.execute({
-        sql: "SELECT * FROM modrinth_projects ORDER BY downloads DESC LIMIT ?",
-        args: [limit]
-      });
-    } else {
-      res = await db.execute({
-        sql: `
-          SELECT * FROM modrinth_projects 
-          WHERE title LIKE ? OR slug LIKE ? OR description LIKE ?
-          ORDER BY downloads DESC 
-          LIMIT ?
-        `,
-        args: [`%${queryTerm}%`, `%${queryTerm}%`, `%${queryTerm}%`, limit]
+    const limitVal = opts.limit ?? 30;
+    const offsetVal = opts.offset ?? 0;
+
+    const whereParts: string[] = [];
+    const args: any[] = [];
+
+    // FTS search term
+    if (queryTerm) {
+      const cleanedWords = queryTerm.replace(/[^a-zA-Z0-9\s]/g, "").trim().split(/\s+/).filter(Boolean);
+      if (cleanedWords.length === 0) {
+        return { hits: [], total: 0 };
+      }
+      const ftsQuery = cleanedWords.map(w => `${w}*`).join(" AND ");
+      whereParts.push("f.mods_fts MATCH ?");
+      args.push(ftsQuery);
+    }
+
+    // Loaders filter
+    if (opts.loaders?.length) {
+      const loaderOrs = opts.loaders.map(() => "m.loaders_json LIKE ?").join(" OR ");
+      whereParts.push(`(${loaderOrs})`);
+      opts.loaders.forEach(l => args.push(`%"${l}"%`));
+    }
+
+    // Versions filter
+    if (opts.versions?.length) {
+      const versionOrs = opts.versions.map(() => "m.versions_json LIKE ?").join(" OR ");
+      whereParts.push(`(${versionOrs})`);
+      opts.versions.forEach(v => args.push(`%"${v}"%`));
+    }
+
+    // Categories filter (matches categories_json or loaders_json)
+    if (opts.categories?.length) {
+      const catOrs = opts.categories.map(() => "(m.categories_json LIKE ? OR m.loaders_json LIKE ?)").join(" OR ");
+      whereParts.push(`(${catOrs})`);
+      opts.categories.forEach(c => {
+        args.push(`%"${c}"%`);
+        args.push(`%"${c}"%`);
       });
     }
-    
+
+    // Environments filter
+    if (opts.environments?.length) {
+      for (const env of opts.environments) {
+        if (env === "client") {
+          whereParts.push("m.client_side != 'unsupported'");
+        } else if (env === "server") {
+          whereParts.push("m.server_side != 'unsupported'");
+        }
+      }
+    }
+
+    const whereClause = whereParts.length > 0 ? `WHERE ${whereParts.join(" AND ")}` : "";
+
+    // Determine sorting
+    let orderBy = "m.download_count DESC";
+    const sort = opts.sort ?? "relevance";
+    if (sort === "downloads") {
+      orderBy = "m.download_count DESC";
+    } else if (sort === "follows") {
+      orderBy = "m.popularity_rank DESC";
+    } else if (sort === "newest") {
+      orderBy = "m.published DESC";
+    } else if (sort === "updated") {
+      orderBy = "m.updated DESC";
+    } else if (sort === "relevance") {
+      orderBy = queryTerm ? "rank" : "m.download_count DESC";
+    }
+
+    // 1. Get total count
+    const countSql = queryTerm
+      ? `SELECT COUNT(*) as count FROM mods_fts f JOIN mods m ON f.rowid = m.rowid ${whereClause}`
+      : `SELECT COUNT(*) as count FROM mods m ${whereClause}`;
+
+    const countRes = await db.execute({
+      sql: countSql,
+      args
+    });
+    const total = Number(countRes.rows[0]?.count ?? 0);
+
+    if (total === 0) {
+      return { hits: [], total: 0 };
+    }
+
+    // 2. Fetch page results
+    const selectSql = queryTerm
+      ? `
+        SELECT 
+          m.id, m.slug, m.name as title, m.summary as description,
+          m.download_count as downloads, m.popularity_rank as followers,
+          m.thumbnail_url as icon_url, m.client_side, m.server_side, m.updated,
+          COALESCE(m.categories_json, '[]') as categories,
+          COALESCE(m.loaders_json, '[]') as loaders,
+          COALESCE(m.versions_json, '[]') as game_versions,
+          COALESCE(m.gallery_json, '[]') as gallery
+        FROM mods_fts f
+        JOIN mods m ON f.rowid = m.rowid
+        ${whereClause}
+        ORDER BY ${orderBy}
+        LIMIT ? OFFSET ?
+      `
+      : `
+        SELECT 
+          m.id, m.slug, m.name as title, m.summary as description,
+          m.download_count as downloads, m.popularity_rank as followers,
+          m.thumbnail_url as icon_url, m.client_side, m.server_side, m.updated,
+          COALESCE(m.categories_json, '[]') as categories,
+          COALESCE(m.loaders_json, '[]') as loaders,
+          COALESCE(m.versions_json, '[]') as game_versions,
+          COALESCE(m.gallery_json, '[]') as gallery
+        FROM mods m
+        ${whereClause}
+        ORDER BY ${orderBy}
+        LIMIT ? OFFSET ?
+      `;
+
+    const selectArgs = [...args, limitVal, offsetVal];
+    const res = await db.execute({
+      sql: selectSql,
+      args: selectArgs
+    });
+
     const projects = res.rows.map(mapModrinthProject);
-    return projects.map((p: any) => ({
+    const hits = projects.map((p: any) => ({
       project_id: p.id,
       slug: p.slug,
       title: p.title,
@@ -177,9 +508,11 @@ export async function localSearchModrinthProjects(query: string, limit = 100): P
       featured_gallery: p.gallery?.find((g: any) => g.featured)?.url || null,
       game_versions: p.game_versions || [],
     }));
+
+    return { hits, total };
   } catch (err) {
     console.error(`[SQLite Error] Failed to search Modrinth projects for "${query}":`, err);
-    return [];
+    return { hits: [], total: 0 };
   }
 }
 
@@ -187,65 +520,79 @@ export async function localSearchModrinthProjects(query: string, limit = 100): P
 export async function localGetCurseforgeMod(id: number): Promise<any | null> {
   try {
     const db = getDb();
+    
+    // Query the mod detail from mods and mod_descriptions
     const modRes = await db.execute({
-      sql: "SELECT * FROM curseforge_mods WHERE id = ?",
+      sql: `
+        SELECT 
+          m.*,
+          d.description_compressed
+        FROM mods m
+        LEFT JOIN mod_descriptions d ON m.id = d.mod_id
+        WHERE m.curse_id = ?
+      `,
       args: [id]
     });
     const modRow = modRes.rows[0];
     if (!modRow) return null;
 
+    const canonicalId = modRow.id as string;
+    const slug = modRow.slug as string;
+
     // Decompress description HTML
-    const description = modRow.description
-      ? zlib.inflateSync(Buffer.from(modRow.description as unknown as ArrayBuffer)).toString("utf-8")
+    let bodyBuffer: Buffer | null = null;
+    const descComp = modRow.description_compressed as any;
+    if (descComp) {
+      if (typeof descComp === "object" && descComp.type === "Buffer") {
+        bodyBuffer = Buffer.from(descComp.data);
+      } else {
+        bodyBuffer = Buffer.from(descComp as ArrayBuffer);
+      }
+    }
+    const description = bodyBuffer
+      ? zlib.inflateSync(bodyBuffer).toString("utf-8")
       : (modRow.summary as string) || "";
 
-    // Parse categories (comma separated)
-    const categories = modRow.categories
-      ? (modRow.categories as string).split(",").map((c: string) => c.trim()).filter(Boolean)
+    // Parse categories from categories_json (precomputed JSON array)
+    const categories = modRow.categories_json
+      ? JSON.parse(modRow.categories_json as string)
       : [];
 
-    // Parse members (comma separated)
-    const members = modRow.members
-      ? (modRow.members as string).split(",").map((m: string) => ({ username: m.trim(), title: "Author" }))
-      : [];
-
-    // Query files
-    const fileRes = await db.execute({
-      sql: "SELECT * FROM curseforge_mod_files WHERE mod_id = ? ORDER BY uploaded_at DESC",
-      args: [id]
+    // Query members/authors from mod_authors and authors
+    const memberRes = await db.execute({
+      sql: `
+        SELECT 
+          a.name,
+          a.username,
+          ma.role
+        FROM mod_authors ma
+        JOIN authors a ON ma.author_id = a.id
+        WHERE ma.mod_id = ?
+      `,
+      args: [canonicalId]
     });
-    const files = fileRes.rows.map((f: any) => {
-      const versions = f.game_versions
-        ? f.game_versions.split(",").map((v: string) => v.trim()).filter(Boolean)
-        : [];
+    const members = memberRes.rows.map((row: any) => ({
+      username: (row.username as string) || (row.name as string),
+      title: (row.role as string) || "Author"
+    }));
 
-      return {
-        id: Number(f.id),
-        name: f.name as string,
-        display: (f.display as string) || (f.name as string),
-        type: f.type === 1 ? "release" : f.type === 2 ? "beta" : f.type === 3 ? "alpha" : "release",
-        filesize: Number(f.filesize),
-        uploaded_at: new Date(Number(f.uploaded_at) * 1000).toISOString(),
-        downloads: Number(f.downloads),
-        versions,
-        url: f.name ? `https://www.curseforge.com/minecraft/mc-mods/${modRow.slug}/download/${f.id}` : ""
-      };
-    });
+    // Query files using our localGetCurseforgeModFiles
+    const files = (await localGetCurseforgeModFiles(id)) || [];
 
     return {
-      id: Number(modRow.id),
+      id: Number(modRow.curse_id),
       name: modRow.name as string,
-      slug: modRow.slug as string,
+      slug: slug,
       summary: modRow.summary as string,
       description,
-      thumbnail: modRow.logo_url as string,
+      thumbnail: modRow.thumbnail_url as string,
       downloads: {
-        total: Number(modRow.downloads || 0)
+        total: Number(modRow.download_count || 0)
       },
       donate: modRow.donate_url as string,
-      created_at: modRow.created_at as string,
+      created_at: modRow.published as string,
       urls: {
-        project: modRow.project_url as string,
+        project: (modRow.curseforge_url as string) || (modRow.page_url as string) || `https://www.curseforge.com/minecraft/mc-mods/${slug}`,
         issues: modRow.issues_url as string,
         source: modRow.source_url as string,
         wiki: modRow.wiki_url as string
@@ -265,40 +612,81 @@ export async function localGetCurseforgeModFiles(curseId: number): Promise<any[]
   try {
     const db = getDb();
     
-    // Check if we have files in database
-    const fileRes = await db.execute({
-      sql: "SELECT * FROM curseforge_mod_files WHERE mod_id = ? ORDER BY uploaded_at DESC",
-      args: [curseId]
-    });
-    if (fileRes.rows.length === 0) return null;
-
-    const cfModRes = await db.execute({
-      sql: "SELECT slug FROM curseforge_mods WHERE id = ?",
-      args: [curseId]
-    });
-    const cfModRow = cfModRes.rows[0];
-
+    // Find the canonical mod id and slug
     const modRes = await db.execute({
-      sql: "SELECT slug FROM mods WHERE curse_id = ?",
+      sql: "SELECT id, slug FROM mods WHERE curse_id = ?",
       args: [curseId]
     });
     const modRow = modRes.rows[0];
+    if (!modRow) return null;
+
+    const canonicalId = modRow.id as string;
+    const slug = modRow.slug as string;
+
+    // Check if we have files in database
+    const fileRes = await db.execute({
+      sql: `
+        SELECT 
+          v.id,
+          v.name,
+          v.version_number as display,
+          v.type,
+          v.filesize,
+          v.uploaded_at,
+          v.downloads,
+          (
+            SELECT json_group_array(mv.version) 
+            FROM version_minecraft_versions vmv
+            JOIN minecraft_versions mv ON vmv.minecraft_version_id = mv.id
+            WHERE vmv.version_id = v.id
+          ) as game_versions_json,
+          (
+            SELECT json_group_array(l.name)
+            FROM version_loaders vl
+            JOIN loaders l ON vl.loader_id = l.id
+            WHERE vl.version_id = v.id
+          ) as loaders_json
+        FROM mod_versions v
+        WHERE v.mod_id = ?
+        ORDER BY v.uploaded_at DESC
+      `,
+      args: [canonicalId]
+    });
     
-    const slug = cfModRow?.slug || modRow?.slug || "mod";
+    if (fileRes.rows.length === 0) return null;
 
     return fileRes.rows.map((f: any) => {
-      const versions = f.game_versions
-        ? f.game_versions.split(",").map((v: string) => v.trim()).filter(Boolean)
+      const gameVersions = f.game_versions_json
+        ? JSON.parse(f.game_versions_json as string)
         : [];
+      const loaders = f.loaders_json
+        ? JSON.parse(f.loaders_json as string)
+        : [];
+
+      // Reconstruct versions array expected by the caller (which merges game versions and loaders)
+      const versions = [...gameVersions, ...loaders.map((l: string) => l.toLowerCase())];
+
+      // Reconstruct type
+      const rawType = f.type;
+      const type =
+        rawType === "release" || rawType === "beta" || rawType === "alpha"
+          ? rawType
+          : rawType === 1
+          ? "release"
+          : rawType === 2
+          ? "beta"
+          : rawType === 3
+          ? "alpha"
+          : "release";
 
       return {
         id: Number(f.id),
         name: f.name as string,
         display: (f.display as string) || (f.name as string),
-        type: f.type === 1 ? "release" : f.type === 2 ? "beta" : f.type === 3 ? "alpha" : "release",
-        filesize: Number(f.filesize),
-        uploaded_at: new Date(Number(f.uploaded_at) * 1000).toISOString(),
-        downloads: Number(f.downloads),
+        type,
+        filesize: Number(f.filesize || 0),
+        uploaded_at: f.uploaded_at,
+        downloads: Number(f.downloads || 0),
         versions,
         url: f.name ? `https://www.curseforge.com/minecraft/mc-mods/${slug}/download/${f.id}` : ""
       };
@@ -308,3 +696,265 @@ export async function localGetCurseforgeModFiles(curseId: number): Promise<any[]
     return null;
   }
 }
+
+function mapModrinthVersion(row: any, slug: string): ModrinthVersion {
+  let changelogBuffer: Buffer | null = null;
+  if (row.changelog_compressed) {
+    if (typeof row.changelog_compressed === "object" && row.changelog_compressed.type === "Buffer") {
+      changelogBuffer = Buffer.from(row.changelog_compressed.data);
+    } else {
+      changelogBuffer = Buffer.from(row.changelog_compressed as ArrayBuffer);
+    }
+  }
+  const changelog = changelogBuffer
+    ? zlib.inflateSync(changelogBuffer).toString("utf-8")
+    : "";
+
+  const gameVersions = row.game_versions_json ? JSON.parse(row.game_versions_json as string) : [];
+  const loaders = row.loaders_json ? JSON.parse(row.loaders_json as string) : [];
+  
+  const filename = `${slug}-${row.version_number}.jar`;
+  const url = `https://cdn.modrinth.com/data/${row.mod_id}/versions/${row.id}/${filename}`;
+
+  return {
+    id: row.id as string,
+    project_id: row.mod_id as string,
+    name: row.name as string,
+    version_number: row.version_number as string,
+    changelog: changelog,
+    dependencies: [],
+    game_versions: gameVersions,
+    version_type: (row.version_type as any) || "release",
+    loaders: loaders,
+    featured: false,
+    status: "listed",
+    date_published: row.date_published as string,
+    downloads: Number(row.downloads || 0),
+    files: [
+      {
+        hashes: { sha1: "", sha512: "" },
+        url: url,
+        filename: filename,
+        primary: true,
+        size: Number(row.filesize || 0),
+        file_type: null
+      }
+    ]
+  };
+}
+
+export async function localGetProjectVersions(
+  projectId: string,
+  opts?: { loaders?: string[]; gameVersions?: string[] }
+): Promise<ModrinthVersion[]> {
+  try {
+    const db = getDb();
+    
+    // First, find the real mod id/slug to ensure we query correct versions
+    const projectRes = await db.execute({
+      sql: "SELECT id, slug FROM mods WHERE id = ? OR slug = ? OR modrinth_id = ?",
+      args: [projectId, projectId, projectId]
+    });
+    const projectRow = projectRes.rows[0];
+    if (!projectRow) {
+      return [];
+    }
+    const realModId = projectRow.id as string;
+    const slug = projectRow.slug as string;
+
+    const whereParts: string[] = ["v.mod_id = ?"];
+    const args: any[] = [realModId];
+
+    if (opts?.loaders?.length) {
+      const loadersPlaceholder = opts.loaders.map(() => "?").join(", ");
+      whereParts.push(`EXISTS (
+        SELECT 1 FROM version_loaders vl
+        JOIN loaders l ON vl.loader_id = l.id
+        WHERE vl.version_id = v.id AND l.name IN (${loadersPlaceholder})
+      )`);
+      opts.loaders.forEach((l) => args.push(l.toLowerCase()));
+    }
+
+    if (opts?.gameVersions?.length) {
+      const gvPlaceholder = opts.gameVersions.map(() => "?").join(", ");
+      whereParts.push(`EXISTS (
+        SELECT 1 FROM version_minecraft_versions vmv
+        JOIN minecraft_versions mv ON vmv.minecraft_version_id = mv.id
+        WHERE vmv.version_id = v.id AND mv.version IN (${gvPlaceholder})
+      )`);
+      opts.gameVersions.forEach((v) => args.push(v));
+    }
+
+    const whereClause = whereParts.join(" AND ");
+    const sql = `
+      SELECT 
+        v.id,
+        v.mod_id,
+        v.name,
+        v.version_number,
+        v.type as version_type,
+        v.filesize,
+        v.uploaded_at as date_published,
+        v.downloads,
+        v.changelog_compressed,
+        (
+          SELECT json_group_array(mv.version) 
+          FROM version_minecraft_versions vmv
+          JOIN minecraft_versions mv ON vmv.minecraft_version_id = mv.id
+          WHERE vmv.version_id = v.id
+        ) as game_versions_json,
+        (
+          SELECT json_group_array(l.name)
+          FROM version_loaders vl
+          JOIN loaders l ON vl.loader_id = l.id
+          WHERE vl.version_id = v.id
+        ) as loaders_json
+      FROM mod_versions v
+      WHERE ${whereClause}
+      ORDER BY v.uploaded_at DESC
+    `;
+
+    const res = await db.execute({ sql, args });
+    return res.rows.map((row: any) => mapModrinthVersion(row, slug));
+  } catch (err) {
+    console.error(`[SQLite Error] Failed to get project versions for ${projectId}:`, err);
+    return [];
+  }
+}
+
+export async function localGetVersion(versionId: string): Promise<ModrinthVersion | null> {
+  try {
+    const db = getDb();
+    const sql = `
+      SELECT 
+        v.id,
+        v.mod_id,
+        v.name,
+        v.version_number,
+        v.type as version_type,
+        v.filesize,
+        v.uploaded_at as date_published,
+        v.downloads,
+        v.changelog_compressed,
+        m.slug,
+        (
+          SELECT json_group_array(mv.version) 
+          FROM version_minecraft_versions vmv
+          JOIN minecraft_versions mv ON vmv.minecraft_version_id = mv.id
+          WHERE vmv.version_id = v.id
+        ) as game_versions_json,
+        (
+          SELECT json_group_array(l.name)
+          FROM version_loaders vl
+          JOIN loaders l ON vl.loader_id = l.id
+          WHERE vl.version_id = v.id
+        ) as loaders_json
+      FROM mod_versions v
+      JOIN mods m ON v.mod_id = m.id
+      WHERE v.id = ?
+    `;
+
+    const res = await db.execute({ sql, args: [versionId] });
+    const row = res.rows[0];
+    if (!row) return null;
+    return mapModrinthVersion(row, row.slug as string);
+  } catch (err) {
+    console.error(`[SQLite Error] Failed to get version ${versionId}:`, err);
+    return null;
+  }
+}
+
+export async function localGetProjectMembers(
+  projectId: string
+): Promise<ModrinthTeamMember[]> {
+  try {
+    const db = getDb();
+    const res = await db.execute({
+      sql: `
+        SELECT 
+          a.id as author_id,
+          a.name,
+          a.username,
+          a.url,
+          a.avatar_url,
+          ma.role
+        FROM mod_authors ma
+        JOIN authors a ON ma.author_id = a.id
+        JOIN mods m ON ma.mod_id = m.id
+        WHERE m.id = ? OR m.slug = ? OR m.modrinth_id = ?
+      `,
+      args: [projectId, projectId, projectId]
+    });
+    
+    return res.rows.map((row: any) => ({
+      team_id: "",
+      user: {
+        id: String(row.author_id),
+        username: (row.username as string) || (row.name as string).toLowerCase().replace(/\s+/g, "_"),
+        name: row.name as string,
+        avatar_url: (row.avatar_url as string) || "",
+        created: ""
+      },
+      role: (row.role as string) || "Author",
+      permissions: null,
+      accepted: true
+    }));
+  } catch (err) {
+    console.error(`[SQLite Error] Failed to get project members for ${projectId}:`, err);
+    return [];
+  }
+}
+
+export async function localGetCurseforgeFile(fileId: number): Promise<any | null> {
+  try {
+    const db = getDb();
+    const res = await db.execute({
+      sql: `
+        SELECT 
+          v.id,
+          v.name,
+          v.version_number,
+          v.type,
+          v.filesize,
+          v.uploaded_at,
+          m.slug
+        FROM mod_versions v
+        JOIN mods m ON v.mod_id = m.id
+        WHERE v.id = ?
+      `,
+      args: [String(fileId)]
+    });
+    const row = res.rows[0];
+    if (!row) return null;
+    return {
+      id: Number(row.id),
+      name: row.name as string,
+      display: row.name as string,
+      version_number: row.version_number as string,
+      type: row.type as string,
+      filesize: Number(row.filesize || 0),
+      uploaded_at: row.uploaded_at as string,
+      slug: row.slug as string
+    };
+  } catch (err) {
+    console.error(`[SQLite Error] Failed to get CurseForge file ${fileId}:`, err);
+    return null;
+  }
+}
+
+export async function localGetModBySlug(slug: string): Promise<any | null> {
+  try {
+    const db = getDb();
+    const res = await db.execute({
+      sql: "SELECT * FROM mods WHERE slug = ? OR id = ? OR mpi_id = ? OR curse_id = ? OR modrinth_id = ?",
+      args: [slug, slug, slug, slug, slug]
+    });
+    return res.rows[0] || null;
+  } catch (err) {
+    console.error(`[SQLite Error] Failed to get mod by slug ${slug}:`, err);
+    return null;
+  }
+}
+
+
+
