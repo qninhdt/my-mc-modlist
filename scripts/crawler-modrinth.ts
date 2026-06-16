@@ -522,6 +522,38 @@ export async function crawlModrinth(forceAll = false, refreshCache = false, only
             }
           }
 
+          // Loaders mapping
+          if (Array.isArray(p.loaders)) {
+            statements.push({
+              sql: "DELETE FROM mod_loaders WHERE mod_id = ?",
+              args: [modId]
+            });
+            for (const loader of p.loaders) {
+              const loaderId = await getOrCreateLoader(loader);
+              statements.push({
+                sql: "INSERT OR IGNORE INTO mod_loaders (mod_id, loader_id) VALUES (?, ?)",
+                args: [modId, loaderId]
+              });
+            }
+          }
+
+          // Minecraft Versions mapping
+          if (Array.isArray(p.game_versions)) {
+            statements.push({
+              sql: "DELETE FROM mod_minecraft_versions WHERE mod_id = ?",
+              args: [modId]
+            });
+            for (const gv of p.game_versions) {
+              if (isMinecraftVersionAllowed(gv)) {
+                const gvId = await getOrCreateMinecraftVersion(gv);
+                statements.push({
+                  sql: "INSERT OR IGNORE INTO mod_minecraft_versions (mod_id, minecraft_version_id) VALUES (?, ?)",
+                  args: [modId, gvId]
+                });
+              }
+            }
+          }
+
           // Authors mapping
           const teamMembers = teamMap.get(p.team) || [];
           if (teamMembers.length > 0) {

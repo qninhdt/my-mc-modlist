@@ -164,6 +164,9 @@ export async function crawlSingleCurseForge(curseId: number, proxyUrl?: string |
         statements.push({ sql: "DELETE FROM mod_versions WHERE id = ?", args: [vId] });
       }
 
+      const unionLoaders = new Set<string>();
+      const unionVersions = new Set<string>();
+
       for (const f of files) {
         const { gameVersions, loaders } = parseGameVersionsAndLoaders(f.versions);
         const allowedGameVersions = gameVersions.filter(isMinecraftVersionAllowed);
@@ -195,6 +198,7 @@ export async function crawlSingleCurseForge(curseId: number, proxyUrl?: string |
         });
 
         for (const loader of loaders) {
+          unionLoaders.add(loader);
           const loaderId = await getOrCreateLoader(loader);
           statements.push({
             sql: "INSERT OR IGNORE INTO version_loaders (version_id, loader_id) VALUES (?, ?)",
@@ -203,12 +207,39 @@ export async function crawlSingleCurseForge(curseId: number, proxyUrl?: string |
         }
 
         for (const gv of allowedGameVersions) {
+          unionVersions.add(gv);
           const gvId = await getOrCreateMinecraftVersion(gv);
           statements.push({
             sql: "INSERT OR IGNORE INTO version_minecraft_versions (version_id, minecraft_version_id) VALUES (?, ?)",
             args: [versionIdStr, gvId]
           });
         }
+      }
+
+      // Write mod-level loaders to mod_loaders
+      statements.push({
+        sql: "DELETE FROM mod_loaders WHERE mod_id = ?",
+        args: [canonicalId]
+      });
+      for (const loader of unionLoaders) {
+        const loaderId = await getOrCreateLoader(loader);
+        statements.push({
+          sql: "INSERT OR IGNORE INTO mod_loaders (mod_id, loader_id) VALUES (?, ?)",
+          args: [canonicalId, loaderId]
+        });
+      }
+
+      // Write mod-level versions to mod_minecraft_versions
+      statements.push({
+        sql: "DELETE FROM mod_minecraft_versions WHERE mod_id = ?",
+        args: [canonicalId]
+      });
+      for (const gv of unionVersions) {
+        const gvId = await getOrCreateMinecraftVersion(gv);
+        statements.push({
+          sql: "INSERT OR IGNORE INTO mod_minecraft_versions (mod_id, minecraft_version_id) VALUES (?, ?)",
+          args: [canonicalId, gvId]
+        });
       }
     }
 

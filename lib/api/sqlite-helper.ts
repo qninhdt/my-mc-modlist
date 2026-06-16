@@ -186,26 +186,42 @@ export async function localSearchMpiModsPaged(
 
     // Loaders filter
     if (opts.loaders?.length) {
-      const loaderOrs = opts.loaders.map(() => "m.loaders_json LIKE ?").join(" OR ");
-      whereParts.push(`(${loaderOrs})`);
-      opts.loaders.forEach(l => args.push(`%"${l}"%`));
+      const placeholders = opts.loaders.map(() => "?").join(", ");
+      whereParts.push(`EXISTS (
+        SELECT 1 FROM mod_loaders ml
+        JOIN loaders l ON ml.loader_id = l.id
+        WHERE ml.mod_id = m.id AND l.name IN (${placeholders})
+      )`);
+      opts.loaders.forEach(l => args.push(l.toLowerCase().trim()));
     }
 
     // Versions filter
     if (opts.versions?.length) {
-      const versionOrs = opts.versions.map(() => "m.versions_json LIKE ?").join(" OR ");
-      whereParts.push(`(${versionOrs})`);
-      opts.versions.forEach(v => args.push(`%"${v}"%`));
+      const placeholders = opts.versions.map(() => "?").join(", ");
+      whereParts.push(`EXISTS (
+        SELECT 1 FROM mod_minecraft_versions mv
+        JOIN minecraft_versions v ON mv.minecraft_version_id = v.id
+        WHERE mv.mod_id = m.id AND v.version IN (${placeholders})
+      )`);
+      opts.versions.forEach(v => args.push(v.trim()));
     }
 
-    // Categories filter (matches categories_json or loaders_json)
+    // Categories filter (matches categories or loaders)
     if (opts.categories?.length) {
-      const catOrs = opts.categories.map(() => "(m.categories_json LIKE ? OR m.loaders_json LIKE ?)").join(" OR ");
-      whereParts.push(`(${catOrs})`);
-      opts.categories.forEach(c => {
-        args.push(`%"${c}"%`);
-        args.push(`%"${c}"%`);
-      });
+      const placeholders = opts.categories.map(() => "?").join(", ");
+      whereParts.push(`(
+        EXISTS (
+          SELECT 1 FROM mod_categories mc
+          JOIN categories c ON mc.category_id = c.id
+          WHERE mc.mod_id = m.id AND c.slug IN (${placeholders})
+        ) OR EXISTS (
+          SELECT 1 FROM mod_loaders ml
+          JOIN loaders l ON ml.loader_id = l.id
+          WHERE ml.mod_id = m.id AND l.name IN (${placeholders})
+        )
+      )`);
+      opts.categories.forEach(c => args.push(c.toLowerCase().trim()));
+      opts.categories.forEach(c => args.push(c.toLowerCase().trim()));
     }
 
     const whereClause = whereParts.length > 0 ? `WHERE ${whereParts.join(" AND ")}` : "";
@@ -395,26 +411,42 @@ export async function localSearchModrinthProjects(
 
     // Loaders filter
     if (opts.loaders?.length) {
-      const loaderOrs = opts.loaders.map(() => "m.loaders_json LIKE ?").join(" OR ");
-      whereParts.push(`(${loaderOrs})`);
-      opts.loaders.forEach(l => args.push(`%"${l}"%`));
+      const placeholders = opts.loaders.map(() => "?").join(", ");
+      whereParts.push(`EXISTS (
+        SELECT 1 FROM mod_loaders ml
+        JOIN loaders l ON ml.loader_id = l.id
+        WHERE ml.mod_id = m.id AND l.name IN (${placeholders})
+      )`);
+      opts.loaders.forEach(l => args.push(l.toLowerCase().trim()));
     }
 
     // Versions filter
     if (opts.versions?.length) {
-      const versionOrs = opts.versions.map(() => "m.versions_json LIKE ?").join(" OR ");
-      whereParts.push(`(${versionOrs})`);
-      opts.versions.forEach(v => args.push(`%"${v}"%`));
+      const placeholders = opts.versions.map(() => "?").join(", ");
+      whereParts.push(`EXISTS (
+        SELECT 1 FROM mod_minecraft_versions mv
+        JOIN minecraft_versions v ON mv.minecraft_version_id = v.id
+        WHERE mv.mod_id = m.id AND v.version IN (${placeholders})
+      )`);
+      opts.versions.forEach(v => args.push(v.trim()));
     }
 
-    // Categories filter (matches categories_json or loaders_json)
+    // Categories filter (matches categories or loaders)
     if (opts.categories?.length) {
-      const catOrs = opts.categories.map(() => "(m.categories_json LIKE ? OR m.loaders_json LIKE ?)").join(" OR ");
-      whereParts.push(`(${catOrs})`);
-      opts.categories.forEach(c => {
-        args.push(`%"${c}"%`);
-        args.push(`%"${c}"%`);
-      });
+      const placeholders = opts.categories.map(() => "?").join(", ");
+      whereParts.push(`(
+        EXISTS (
+          SELECT 1 FROM mod_categories mc
+          JOIN categories c ON mc.category_id = c.id
+          WHERE mc.mod_id = m.id AND c.slug IN (${placeholders})
+        ) OR EXISTS (
+          SELECT 1 FROM mod_loaders ml
+          JOIN loaders l ON ml.loader_id = l.id
+          WHERE ml.mod_id = m.id AND l.name IN (${placeholders})
+        )
+      )`);
+      opts.categories.forEach(c => args.push(c.toLowerCase().trim()));
+      opts.categories.forEach(c => args.push(c.toLowerCase().trim()));
     }
 
     // Environments filter

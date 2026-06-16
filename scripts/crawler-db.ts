@@ -51,6 +51,8 @@ export async function initDb(forceReset: boolean) {
     console.log("Flag --reset passed. Dropping existing tables...");
     await db.execute("DROP TABLE IF EXISTS version_loaders");
     await db.execute("DROP TABLE IF EXISTS version_minecraft_versions");
+    await db.execute("DROP TABLE IF EXISTS mod_loaders");
+    await db.execute("DROP TABLE IF EXISTS mod_minecraft_versions");
     await db.execute("DROP TABLE IF EXISTS mod_versions");
     await db.execute("DROP TABLE IF EXISTS mod_authors");
     await db.execute("DROP TABLE IF EXISTS mod_categories");
@@ -217,12 +219,35 @@ export async function initDb(forceReset: boolean) {
     )
   `);
 
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS mod_loaders (
+      mod_id TEXT NOT NULL,
+      loader_id INTEGER NOT NULL,
+      PRIMARY KEY (mod_id, loader_id),
+      FOREIGN KEY (mod_id) REFERENCES mods(id) ON DELETE CASCADE,
+      FOREIGN KEY (loader_id) REFERENCES loaders(id) ON DELETE CASCADE
+    )
+  `);
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS mod_minecraft_versions (
+      mod_id TEXT NOT NULL,
+      minecraft_version_id INTEGER NOT NULL,
+      PRIMARY KEY (mod_id, minecraft_version_id),
+      FOREIGN KEY (mod_id) REFERENCES mods(id) ON DELETE CASCADE,
+      FOREIGN KEY (minecraft_version_id) REFERENCES minecraft_versions(id) ON DELETE CASCADE
+    )
+  `);
+
   await db.execute("CREATE INDEX IF NOT EXISTS idx_mods_name ON mods(name)");
   await db.execute("CREATE INDEX IF NOT EXISTS idx_mods_slug ON mods(slug)");
   await db.execute("CREATE INDEX IF NOT EXISTS idx_mods_mpi_id ON mods(mpi_id)");
   await db.execute("CREATE INDEX IF NOT EXISTS idx_mods_curse_id ON mods(curse_id)");
   await db.execute("CREATE INDEX IF NOT EXISTS idx_mods_modrinth_id ON mods(modrinth_id)");
   await db.execute("CREATE INDEX IF NOT EXISTS idx_mod_versions_mod_id ON mod_versions(mod_id)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_mod_loaders_loader_id ON mod_loaders(loader_id)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_mod_minecraft_versions_version_id ON mod_minecraft_versions(minecraft_version_id)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_mod_categories_category_id ON mod_categories(category_id)");
 }
 
 export async function getOrCreateCategory(name: string, slug: string): Promise<number> {
