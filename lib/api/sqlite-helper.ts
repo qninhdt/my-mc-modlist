@@ -80,10 +80,10 @@ export async function localGetMpiMod(id: number): Promise<ModpackIndexMod | null
         SELECT 
           m.*,
           json_object('curseforge', m.curseforge_url, 'modrinth', m.modrinth_url) as links_json,
-          CASE WHEN m.modrinth_id IS NOT NULL THEN json_array(json_object('project_id', m.modrinth_id, 'slug', m.slug, 'loaders', json(COALESCE(m.loaders_json, '[]')))) ELSE '[]' END as modrinth_info_json,
+          CASE WHEN m.modrinth_id IS NOT NULL THEN json_array(json_object('project_id', m.modrinth_id, 'slug', m.slug, 'loaders', (SELECT json_group_array(DISTINCT l.name) FROM loaders l JOIN mod_loaders ml ON l.id = ml.loader_id WHERE ml.mod_id = m.id))) ELSE '[]' END as modrinth_info_json,
           (SELECT json_group_array(json_object('name', a.name, 'url', a.url)) FROM authors a JOIN mod_authors ma ON a.id = ma.author_id WHERE ma.mod_id = m.id) as authors_json,
-          m.categories_json as categories_json,
-          m.versions_json as versions_json
+          (SELECT json_group_array(c.slug) FROM categories c JOIN mod_categories mc ON c.id = mc.category_id WHERE mc.mod_id = m.id) as categories_json,
+          (SELECT json_group_array(DISTINCT v.version) FROM minecraft_versions v JOIN mod_minecraft_versions mmv ON v.id = mmv.minecraft_version_id WHERE mmv.mod_id = m.id) as versions_json
         FROM mods m
         WHERE m.mpi_id = ? OR m.curse_id = ? OR m.id = ?
       `,
@@ -110,10 +110,10 @@ export async function localSearchMpiMods(query: string, limit = 250): Promise<Mo
           SELECT 
             m.*,
             json_object('curseforge', m.curseforge_url, 'modrinth', m.modrinth_url) as links_json,
-            CASE WHEN m.modrinth_id IS NOT NULL THEN json_array(json_object('project_id', m.modrinth_id, 'slug', m.slug, 'loaders', json(COALESCE(m.loaders_json, '[]')))) ELSE '[]' END as modrinth_info_json,
+            CASE WHEN m.modrinth_id IS NOT NULL THEN json_array(json_object('project_id', m.modrinth_id, 'slug', m.slug, 'loaders', (SELECT json_group_array(DISTINCT l.name) FROM loaders l JOIN mod_loaders ml ON l.id = ml.loader_id WHERE ml.mod_id = m.id))) ELSE '[]' END as modrinth_info_json,
             (SELECT json_group_array(json_object('name', a.name, 'url', a.url)) FROM authors a JOIN mod_authors ma ON a.id = ma.author_id WHERE ma.mod_id = m.id) as authors_json,
-            m.categories_json as categories_json,
-            m.versions_json as versions_json
+            (SELECT json_group_array(c.slug) FROM categories c JOIN mod_categories mc ON c.id = mc.category_id WHERE mc.mod_id = m.id) as categories_json,
+            (SELECT json_group_array(DISTINCT v.version) FROM minecraft_versions v JOIN mod_minecraft_versions mmv ON v.id = mmv.minecraft_version_id WHERE mmv.mod_id = m.id) as versions_json
           FROM mods m 
           ORDER BY m.download_count DESC 
           LIMIT ?
@@ -132,10 +132,10 @@ export async function localSearchMpiMods(query: string, limit = 250): Promise<Mo
           SELECT 
             m.*,
             json_object('curseforge', m.curseforge_url, 'modrinth', m.modrinth_url) as links_json,
-            CASE WHEN m.modrinth_id IS NOT NULL THEN json_array(json_object('project_id', m.modrinth_id, 'slug', m.slug, 'loaders', json(COALESCE(m.loaders_json, '[]')))) ELSE '[]' END as modrinth_info_json,
+            CASE WHEN m.modrinth_id IS NOT NULL THEN json_array(json_object('project_id', m.modrinth_id, 'slug', m.slug, 'loaders', (SELECT json_group_array(DISTINCT l.name) FROM loaders l JOIN mod_loaders ml ON l.id = ml.loader_id WHERE ml.mod_id = m.id))) ELSE '[]' END as modrinth_info_json,
             (SELECT json_group_array(json_object('name', a.name, 'url', a.url)) FROM authors a JOIN mod_authors ma ON a.id = ma.author_id WHERE ma.mod_id = m.id) as authors_json,
-            m.categories_json as categories_json,
-            m.versions_json as versions_json
+            (SELECT json_group_array(c.slug) FROM categories c JOIN mod_categories mc ON c.id = mc.category_id WHERE mc.mod_id = m.id) as categories_json,
+            (SELECT json_group_array(DISTINCT v.version) FROM minecraft_versions v JOIN mod_minecraft_versions mmv ON v.id = mmv.minecraft_version_id WHERE mmv.mod_id = m.id) as versions_json
           FROM mods_fts f
           JOIN mods m ON f.rowid = m.rowid
           WHERE mods_fts MATCH ?
@@ -179,30 +179,22 @@ export async function localSearchMpiModsPaged(
       if (cleanedWords.length === 0) {
         return { hits: [], total: 0 };
       }
-      const ftsQuery = cleanedWords.map(w => `${w}*`).join(" AND ");
-      whereParts.push("f.mods_fts MATCH ?");
-      args.push(ftsQuery);
+      const ftsQuery = cleanedWords.map(w => `%${w}%`);
+      whereParts.push("(" + ftsQuery.map(() => "m.name LIKE ? OR m.slug LIKE ?").join(" AND ") + ")");
+      ftsQuery.forEach(q => { args.push(q); args.push(q); });
     }
 
     // Loaders filter
     if (opts.loaders?.length) {
       const placeholders = opts.loaders.map(() => "?").join(", ");
-      whereParts.push(`EXISTS (
-        SELECT 1 FROM mod_loaders ml
-        JOIN loaders l ON ml.loader_id = l.id
-        WHERE ml.mod_id = m.id AND l.name IN (${placeholders})
-      )`);
+      whereParts.push(`m.id IN (SELECT ml.mod_id FROM mod_loaders ml JOIN loaders l ON ml.loader_id = l.id WHERE l.name IN (${placeholders}))`);
       opts.loaders.forEach(l => args.push(l.toLowerCase().trim()));
     }
 
     // Versions filter
     if (opts.versions?.length) {
       const placeholders = opts.versions.map(() => "?").join(", ");
-      whereParts.push(`EXISTS (
-        SELECT 1 FROM mod_minecraft_versions mv
-        JOIN minecraft_versions v ON mv.minecraft_version_id = v.id
-        WHERE mv.mod_id = m.id AND v.version IN (${placeholders})
-      )`);
+      whereParts.push(`m.id IN (SELECT mmv.mod_id FROM mod_minecraft_versions mmv JOIN minecraft_versions v ON mmv.minecraft_version_id = v.id WHERE v.version IN (${placeholders}))`);
       opts.versions.forEach(v => args.push(v.trim()));
     }
 
@@ -214,11 +206,7 @@ export async function localSearchMpiModsPaged(
           SELECT 1 FROM mod_categories mc
           JOIN categories c ON mc.category_id = c.id
           WHERE mc.mod_id = m.id AND c.slug IN (${placeholders})
-        ) OR EXISTS (
-          SELECT 1 FROM mod_loaders ml
-          JOIN loaders l ON ml.loader_id = l.id
-          WHERE ml.mod_id = m.id AND l.name IN (${placeholders})
-        )
+        ) OR m.id IN (SELECT ml.mod_id FROM mod_loaders ml JOIN loaders l ON ml.loader_id = l.id WHERE l.name IN (${placeholders}))
       )`);
       opts.categories.forEach(c => args.push(c.toLowerCase().trim()));
       opts.categories.forEach(c => args.push(c.toLowerCase().trim()));
@@ -226,59 +214,35 @@ export async function localSearchMpiModsPaged(
 
     const whereClause = whereParts.length > 0 ? `WHERE ${whereParts.join(" AND ")}` : "";
 
-    // Determine sorting
+    // Determine sorting and index
     let orderBy = "m.download_count DESC";
+    let indexHint = "INDEXED BY idx_mods_download_count";
     const sort = opts.sort ?? "relevance";
-    if (sort === "downloads") {
+    if (sort === "downloads" || sort === "relevance") {
       orderBy = "m.download_count DESC";
+      indexHint = "INDEXED BY idx_mods_download_count";
     } else if (sort === "follows") {
       orderBy = "m.popularity_rank DESC";
+      indexHint = "INDEXED BY idx_mods_popularity_rank";
     } else if (sort === "newest") {
       orderBy = "m.published DESC";
+      indexHint = "INDEXED BY idx_mods_published";
     } else if (sort === "updated") {
       orderBy = "m.updated DESC";
-    } else if (sort === "relevance") {
-      orderBy = queryTerm ? "rank" : "m.download_count DESC";
+      indexHint = "INDEXED BY idx_mods_updated";
+    }
+
+    // Do not force index if we are using FTS, as SQLite might prefer the FTS virtual table approach
+    if (queryTerm) {
+      indexHint = "";
     }
 
     // 1. Get total count (cached in Redis to bypass Full-Table Scans on pagination)
     let countSql = "";
     if (queryTerm) {
-      countSql = `SELECT COUNT(*) as count FROM mods_fts f JOIN mods m ON f.rowid = m.rowid ${whereClause}`;
+      countSql = `SELECT COUNT(*) as count FROM mods m ${whereClause}`;
     } else {
-      const hasLoaders = opts.loaders?.length;
-      const hasVersions = opts.versions?.length;
-      const hasCategories = opts.categories?.length;
-
-      if (hasLoaders || hasVersions || hasCategories) {
-        const joinParts: string[] = ["mods m"];
-        const countWhereParts: string[] = ["m.curse_id IS NOT NULL"];
-
-        if (hasLoaders) {
-          joinParts.push("JOIN mod_loaders ml ON m.id = ml.mod_id");
-          joinParts.push("JOIN loaders l ON ml.loader_id = l.id");
-          const placeholders = opts.loaders!.map(() => "?").join(", ");
-          countWhereParts.push(`l.name IN (${placeholders})`);
-        }
-
-        if (hasVersions) {
-          joinParts.push("JOIN mod_minecraft_versions mv ON m.id = mv.mod_id");
-          joinParts.push("JOIN minecraft_versions v ON mv.minecraft_version_id = v.id");
-          const placeholders = opts.versions!.map(() => "?").join(", ");
-          countWhereParts.push(`v.version IN (${placeholders})`);
-        }
-
-        if (hasCategories) {
-          joinParts.push("JOIN mod_categories mc ON m.id = mc.mod_id");
-          joinParts.push("JOIN categories c ON mc.category_id = c.id");
-          const placeholders = opts.categories!.map(() => "?").join(", ");
-          countWhereParts.push(`c.slug IN (${placeholders})`);
-        }
-
-        countSql = `SELECT COUNT(DISTINCT m.id) as count FROM ${joinParts.join(" ")} WHERE ${countWhereParts.join(" AND ")}`;
-      } else {
-        countSql = `SELECT COUNT(*) as count FROM mods m ${whereClause}`;
-      }
+      countSql = `SELECT COUNT(*) as count FROM mods m ${whereClause}`;
     }
 
     const total = await getCachedCount(countSql, args);
@@ -288,30 +252,15 @@ export async function localSearchMpiModsPaged(
     }
 
     // 2. Fetch page results
-    const selectSql = queryTerm
-      ? `
+    const selectSql = `
         SELECT 
           m.*,
           json_object('curseforge', m.curseforge_url, 'modrinth', m.modrinth_url) as links_json,
-          CASE WHEN m.modrinth_id IS NOT NULL THEN json_array(json_object('project_id', m.modrinth_id, 'slug', m.slug, 'loaders', json(COALESCE(m.loaders_json, '[]')))) ELSE '[]' END as modrinth_info_json,
+          CASE WHEN m.modrinth_id IS NOT NULL THEN json_array(json_object('project_id', m.modrinth_id, 'slug', m.slug, 'loaders', (SELECT json_group_array(DISTINCT l.name) FROM loaders l JOIN mod_loaders ml ON l.id = ml.loader_id WHERE ml.mod_id = m.id))) ELSE '[]' END as modrinth_info_json,
           (SELECT json_group_array(json_object('name', a.name, 'url', a.url)) FROM authors a JOIN mod_authors ma ON a.id = ma.author_id WHERE ma.mod_id = m.id) as authors_json,
-          m.categories_json as categories_json,
-          m.versions_json as versions_json
-        FROM mods_fts f
-        JOIN mods m ON f.rowid = m.rowid
-        ${whereClause}
-        ORDER BY ${orderBy}
-        LIMIT ? OFFSET ?
-      `
-      : `
-        SELECT 
-          m.*,
-          json_object('curseforge', m.curseforge_url, 'modrinth', m.modrinth_url) as links_json,
-          CASE WHEN m.modrinth_id IS NOT NULL THEN json_array(json_object('project_id', m.modrinth_id, 'slug', m.slug, 'loaders', json(COALESCE(m.loaders_json, '[]')))) ELSE '[]' END as modrinth_info_json,
-          (SELECT json_group_array(json_object('name', a.name, 'url', a.url)) FROM authors a JOIN mod_authors ma ON a.id = ma.author_id WHERE ma.mod_id = m.id) as authors_json,
-          m.categories_json as categories_json,
-          m.versions_json as versions_json
-        FROM mods m
+          (SELECT json_group_array(c.slug) FROM categories c JOIN mod_categories mc ON c.id = mc.category_id WHERE mc.mod_id = m.id) as categories_json,
+          (SELECT json_group_array(DISTINCT v.version) FROM minecraft_versions v JOIN mod_minecraft_versions mmv ON v.id = mmv.minecraft_version_id WHERE mmv.mod_id = m.id) as versions_json
+        FROM mods m ${indexHint}
         ${whereClause}
         ORDER BY ${orderBy}
         LIMIT ? OFFSET ?
@@ -376,7 +325,7 @@ export async function localGetModrinthProject(idOrSlug: string): Promise<Modrint
     const db = getDb();
     const res = await db.execute({
       sql: `
-        SELECT 
+        SELECT
           m.id,
           m.slug,
           m.name as title,
@@ -393,10 +342,9 @@ export async function localGetModrinthProject(idOrSlug: string): Promise<Modrint
           m.wiki_url,
           m.published,
           m.updated,
-          COALESCE(m.categories_json, '[]') as categories,
-          COALESCE(m.loaders_json, '[]') as loaders,
-          COALESCE(m.versions_json, '[]') as game_versions,
-          COALESCE(m.gallery_json, '[]') as gallery
+          (SELECT json_group_array(c.slug) FROM categories c JOIN mod_categories mc ON c.id = mc.category_id WHERE mc.mod_id = m.id) as categories,
+          (SELECT json_group_array(DISTINCT l.name) FROM loaders l JOIN mod_loaders ml ON l.id = ml.loader_id WHERE ml.mod_id = m.id) as loaders,
+          (SELECT json_group_array(DISTINCT v.version) FROM minecraft_versions v JOIN mod_minecraft_versions mmv ON v.id = mmv.minecraft_version_id WHERE mmv.mod_id = m.id) as game_versions
         FROM mods m
         LEFT JOIN mod_descriptions d ON m.id = d.mod_id
         WHERE m.id = ? OR m.slug = ? OR m.modrinth_id = ?
@@ -432,6 +380,7 @@ export async function localSearchModrinthProjects(
 
     const whereParts: string[] = [];
     const args: any[] = [];
+    let ftsJoin = "";
 
     // FTS search term
     if (queryTerm) {
@@ -439,30 +388,23 @@ export async function localSearchModrinthProjects(
       if (cleanedWords.length === 0) {
         return { hits: [], total: 0 };
       }
-      const ftsQuery = cleanedWords.map(w => `${w}*`).join(" AND ");
-      whereParts.push("f.mods_fts MATCH ?");
-      args.push(ftsQuery);
+      const ftsMatchQuery = cleanedWords.map(w => `${w}*`).join(" AND ");
+      ftsJoin = "JOIN mods_fts f ON m.rowid = f.rowid";
+      whereParts.push("mods_fts MATCH ?");
+      args.push(ftsMatchQuery);
     }
 
     // Loaders filter
     if (opts.loaders?.length) {
       const placeholders = opts.loaders.map(() => "?").join(", ");
-      whereParts.push(`EXISTS (
-        SELECT 1 FROM mod_loaders ml
-        JOIN loaders l ON ml.loader_id = l.id
-        WHERE ml.mod_id = m.id AND l.name IN (${placeholders})
-      )`);
+      whereParts.push(`m.id IN (SELECT ml.mod_id FROM mod_loaders ml JOIN loaders l ON ml.loader_id = l.id WHERE l.name IN (${placeholders}))`);
       opts.loaders.forEach(l => args.push(l.toLowerCase().trim()));
     }
 
     // Versions filter
     if (opts.versions?.length) {
       const placeholders = opts.versions.map(() => "?").join(", ");
-      whereParts.push(`EXISTS (
-        SELECT 1 FROM mod_minecraft_versions mv
-        JOIN minecraft_versions v ON mv.minecraft_version_id = v.id
-        WHERE mv.mod_id = m.id AND v.version IN (${placeholders})
-      )`);
+      whereParts.push(`m.id IN (SELECT mmv.mod_id FROM mod_minecraft_versions mmv JOIN minecraft_versions v ON mmv.minecraft_version_id = v.id WHERE v.version IN (${placeholders}))`);
       opts.versions.forEach(v => args.push(v.trim()));
     }
 
@@ -474,11 +416,7 @@ export async function localSearchModrinthProjects(
           SELECT 1 FROM mod_categories mc
           JOIN categories c ON mc.category_id = c.id
           WHERE mc.mod_id = m.id AND c.slug IN (${placeholders})
-        ) OR EXISTS (
-          SELECT 1 FROM mod_loaders ml
-          JOIN loaders l ON ml.loader_id = l.id
-          WHERE ml.mod_id = m.id AND l.name IN (${placeholders})
-        )
+        ) OR m.id IN (SELECT ml.mod_id FROM mod_loaders ml JOIN loaders l ON ml.loader_id = l.id WHERE l.name IN (${placeholders}))
       )`);
       opts.categories.forEach(c => args.push(c.toLowerCase().trim()));
       opts.categories.forEach(c => args.push(c.toLowerCase().trim()));
@@ -497,70 +435,35 @@ export async function localSearchModrinthProjects(
 
     const whereClause = whereParts.length > 0 ? `WHERE ${whereParts.join(" AND ")}` : "";
 
-    // Determine sorting
+    // Determine sorting and index
     let orderBy = "m.download_count DESC";
+    let indexHint = "INDEXED BY idx_mods_download_count";
     const sort = opts.sort ?? "relevance";
-    if (sort === "downloads") {
+    if (sort === "downloads" || sort === "relevance") {
       orderBy = "m.download_count DESC";
+      indexHint = "INDEXED BY idx_mods_download_count";
     } else if (sort === "follows") {
       orderBy = "m.popularity_rank DESC";
+      indexHint = "INDEXED BY idx_mods_popularity_rank";
     } else if (sort === "newest") {
       orderBy = "m.published DESC";
+      indexHint = "INDEXED BY idx_mods_published";
     } else if (sort === "updated") {
       orderBy = "m.updated DESC";
-    } else if (sort === "relevance") {
-      orderBy = queryTerm ? "rank" : "m.download_count DESC";
+      indexHint = "INDEXED BY idx_mods_updated";
     }
 
-    // 1. Get total count (cached in Redis to bypass Full-Table Scans on pagination)
+    // Do not force index if we are using FTS, as SQLite might prefer the FTS virtual table approach
+    if (queryTerm) {
+      indexHint = "";
+    }
+
+    // 1. Get total count
     let countSql = "";
     if (queryTerm) {
-      countSql = `SELECT COUNT(*) as count FROM mods_fts f JOIN mods m ON f.rowid = m.rowid ${whereClause}`;
+      countSql = `SELECT COUNT(*) as count FROM mods m ${ftsJoin} ${whereClause}`;
     } else {
-      const hasLoaders = opts.loaders?.length;
-      const hasVersions = opts.versions?.length;
-      const hasCategories = opts.categories?.length;
-
-      if (hasLoaders || hasVersions || hasCategories) {
-        const joinParts: string[] = ["mods m"];
-        const countWhereParts: string[] = [];
-
-        if (hasLoaders) {
-          joinParts.push("JOIN mod_loaders ml ON m.id = ml.mod_id");
-          joinParts.push("JOIN loaders l ON ml.loader_id = l.id");
-          const placeholders = opts.loaders!.map(() => "?").join(", ");
-          countWhereParts.push(`l.name IN (${placeholders})`);
-        }
-
-        if (hasVersions) {
-          joinParts.push("JOIN mod_minecraft_versions mv ON m.id = mv.mod_id");
-          joinParts.push("JOIN minecraft_versions v ON mv.minecraft_version_id = v.id");
-          const placeholders = opts.versions!.map(() => "?").join(", ");
-          countWhereParts.push(`v.version IN (${placeholders})`);
-        }
-
-        if (hasCategories) {
-          joinParts.push("JOIN mod_categories mc ON m.id = mc.mod_id");
-          joinParts.push("JOIN categories c ON mc.category_id = c.id");
-          const placeholders = opts.categories!.map(() => "?").join(", ");
-          countWhereParts.push(`c.slug IN (${placeholders})`);
-        }
-
-        if (opts.environments?.length) {
-          for (const env of opts.environments) {
-            if (env === "client") {
-              countWhereParts.push("m.client_side != 'unsupported'");
-            } else if (env === "server") {
-              countWhereParts.push("m.server_side != 'unsupported'");
-            }
-          }
-        }
-
-        const countWhereClause = countWhereParts.length > 0 ? `WHERE ${countWhereParts.join(" AND ")}` : "";
-        countSql = `SELECT COUNT(DISTINCT m.id) as count FROM ${joinParts.join(" ")} ${countWhereClause}`;
-      } else {
-        countSql = `SELECT COUNT(*) as count FROM mods m ${whereClause}`;
-      }
+      countSql = `SELECT COUNT(*) as count FROM mods m ${whereClause}`;
     }
 
     const total = await getCachedCount(countSql, args);
@@ -570,32 +473,16 @@ export async function localSearchModrinthProjects(
     }
 
     // 2. Fetch page results
-    const selectSql = queryTerm
-      ? `
+    const selectSql = `
         SELECT 
           m.id, m.slug, m.name as title, m.summary as description,
           m.download_count as downloads, m.popularity_rank as followers,
           m.thumbnail_url as icon_url, m.client_side, m.server_side, m.updated,
-          COALESCE(m.categories_json, '[]') as categories,
-          COALESCE(m.loaders_json, '[]') as loaders,
-          COALESCE(m.versions_json, '[]') as game_versions,
-          COALESCE(m.gallery_json, '[]') as gallery
-        FROM mods_fts f
-        JOIN mods m ON f.rowid = m.rowid
-        ${whereClause}
-        ORDER BY ${orderBy}
-        LIMIT ? OFFSET ?
-      `
-      : `
-        SELECT 
-          m.id, m.slug, m.name as title, m.summary as description,
-          m.download_count as downloads, m.popularity_rank as followers,
-          m.thumbnail_url as icon_url, m.client_side, m.server_side, m.updated,
-          COALESCE(m.categories_json, '[]') as categories,
-          COALESCE(m.loaders_json, '[]') as loaders,
-          COALESCE(m.versions_json, '[]') as game_versions,
-          COALESCE(m.gallery_json, '[]') as gallery
-        FROM mods m
+          (SELECT json_group_array(c.slug) FROM categories c JOIN mod_categories mc ON c.id = mc.category_id WHERE mc.mod_id = m.id) as categories,
+          (SELECT json_group_array(DISTINCT l.name) FROM loaders l JOIN mod_loaders ml ON l.id = ml.loader_id WHERE ml.mod_id = m.id) as loaders,
+          (SELECT json_group_array(DISTINCT v.version) FROM minecraft_versions v JOIN mod_minecraft_versions mmv ON v.id = mmv.minecraft_version_id WHERE mmv.mod_id = m.id) as game_versions
+        FROM mods m ${indexHint}
+        ${ftsJoin}
         ${whereClause}
         ORDER BY ${orderBy}
         LIMIT ? OFFSET ?

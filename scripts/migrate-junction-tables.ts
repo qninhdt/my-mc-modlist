@@ -1,13 +1,6 @@
 import { createClient } from "@libsql/client";
 import dotenv from "dotenv";
-import {
-  initDb,
-  loadCaches,
-  getOrCreateCategory,
-  getOrCreateLoader,
-  getOrCreateMinecraftVersion,
-  isMinecraftVersionAllowed
-} from "./crawler-db";
+import { loadCaches } from "./crawler-db";
 
 dotenv.config({ path: ".env.local" });
 
@@ -48,114 +41,23 @@ async function migrate() {
   // Load category, loader, version caches
   await loadCaches();
 
-  // 2. Fetch all mods with JSON data
-  console.log("Fetching mods from database...");
-  const modsRes = await db.execute("SELECT id, loaders_json, versions_json, categories_json FROM mods");
-  const mods = modsRes.rows;
-  console.log(`Found ${mods.length} mods to process.`);
+  // 2. Populate mod_loaders from version_loaders
+  console.log("Populating mod_loaders from version_loaders...");
+  await db.execute(`
+    INSERT OR IGNORE INTO mod_loaders (mod_id, loader_id)
+    SELECT DISTINCT mv.mod_id, vl.loader_id
+    FROM mod_versions mv
+    JOIN version_loaders vl ON mv.id = vl.version_id
+  `);
 
-  const batchSize = 100;
-  let processed = 0;
-
-  for (let i = 0; i < mods.length; i += batchSize) {
-    const batch = mods.slice(i, i + batchSize);
-    const statements: any[] = [];
-
-    for (const mod of batch) {
-      const modId = mod.id as string;
-      if (!modId) continue;
-
-      // Parse and migrate Loaders
-      if (mod.loaders_json) {
-        try {
-          const loaders = JSON.parse(mod.loaders_json as string);
-          if (Array.isArray(loaders)) {
-            statements.push({
-              sql: "DELETE FROM mod_loaders WHERE mod_id = ?",
-              args: [modId]
-            });
-            for (const loader of loaders) {
-              const loaderId = await getOrCreateLoader(loader);
-              statements.push({
-                sql: "INSERT OR IGNORE INTO mod_loaders (mod_id, loader_id) VALUES (?, ?)",
-                args: [modId, loaderId]
-              });
-            }
-          }
-        } catch (e) {
-          console.warn(`Failed to parse loaders_json for mod ${modId}`);
-        }
-      }
-
-      // Parse and migrate Versions
-      if (mod.versions_json) {
-        try {
-          const versions = JSON.parse(mod.versions_json as string);
-          if (Array.isArray(versions)) {
-            statements.push({
-              sql: "DELETE FROM mod_minecraft_versions WHERE mod_id = ?",
-              args: [modId]
-            });
-            for (const version of versions) {
-              if (isMinecraftVersionAllowed(version)) {
-                const verId = await getOrCreateMinecraftVersion(version);
-                statements.push({
-                  sql: "INSERT OR IGNORE INTO mod_minecraft_versions (mod_id, minecraft_version_id) VALUES (?, ?)",
-                  args: [modId, verId]
-                });
-              }
-            }
-          }
-        } catch (e) {
-          console.warn(`Failed to parse versions_json for mod ${modId}`);
-        }
-      }
-
-      // Parse and migrate Categories (sync mod_categories just in case)
-      if (mod.categories_json) {
-        try {
-          const categories = JSON.parse(mod.categories_json as string);
-          if (Array.isArray(categories)) {
-            statements.push({
-              sql: "DELETE FROM mod_categories WHERE mod_id = ?",
-              args: [modId]
-            });
-            for (const cat of categories) {
-              let catName = "";
-              let catSlug = "";
-              if (typeof cat === "string") {
-                catSlug = cat.toLowerCase().replace(/\s+/g, "-");
-                catName = cat;
-              } else if (cat && typeof cat === "object") {
-                catSlug = cat.slug || cat.name?.toLowerCase().replace(/\s+/g, "-");
-                catName = cat.name || catSlug;
-              }
-              if (catSlug) {
-                const catId = await getOrCreateCategory(catName, catSlug);
-                statements.push({
-                  sql: "INSERT OR IGNORE INTO mod_categories (mod_id, category_id) VALUES (?, ?)",
-                  args: [modId, catId]
-                });
-              }
-            }
-          }
-        } catch (e) {
-          console.warn(`Failed to parse categories_json for mod ${modId}`);
-        }
-      }
-    }
-
-    if (statements.length > 0) {
-      try {
-        await db.batch(statements, "write");
-      } catch (err: any) {
-        console.error(`Failed to execute batch migration for index ${i}:`, err.message);
-      }
-    }
-
-    processed += batch.length;
-    process.stdout.write(`\rProgress: ${processed}/${mods.length} mods migrated...`);
-  }
+  // 3. Populate mod_minecraft_versions from version_minecraft_versions
+  console.log("Populating mod_minecraft_versions from version_minecraft_versions...");
+  await db.execute(`
+    INSERT OR IGNORE INTO mod_minecraft_versions (mod_id, minecraft_version_id)
+    SELECT DISTINCT mv.mod_id, vmv.minecraft_version_id
+    FROM mod_versions mv
+    JOIN version_minecraft_versions vmv ON mv.id = vmv.version_id
+  `);
 
   console.log(`\n🎉 Migration successfully completed!`);
   process.exit(0);

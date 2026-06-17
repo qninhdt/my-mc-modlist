@@ -248,6 +248,11 @@ export async function initDb(forceReset: boolean) {
   await db.execute("CREATE INDEX IF NOT EXISTS idx_mod_loaders_loader_id ON mod_loaders(loader_id)");
   await db.execute("CREATE INDEX IF NOT EXISTS idx_mod_minecraft_versions_version_id ON mod_minecraft_versions(minecraft_version_id)");
   await db.execute("CREATE INDEX IF NOT EXISTS idx_mod_categories_category_id ON mod_categories(category_id)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_mods_download_count ON mods(download_count DESC)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_mods_popularity_rank ON mods(popularity_rank DESC)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_mods_published ON mods(published DESC)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_mods_updated ON mods(updated DESC)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_mod_versions_mod_id_uploaded_at ON mod_versions(mod_id, uploaded_at DESC)");
 }
 
 export async function getOrCreateCategory(name: string, slug: string): Promise<number> {
